@@ -6,10 +6,11 @@ Clone it, add one folder that describes your company (docs, tools, roles, prompt
 cases), and you get an assistant built from clearly separated AI layers: model, prompts,
 RAG, tools (MCP), agent, access control, guardrails, cache and router, observability and evals.
 
-**Status: early.** Milestones M0 to M2 are done: the service answers chat requests through
-a vendor-neutral model layer with failover, using versioned prompts, and can return
-schema-validated structured output. There is no retrieval, tool use or access control yet.
-See [docs/PLAN.md](docs/PLAN.md) for the design and the milestone list.
+**Status: early.** Milestones M0 to M3 are done: the service answers questions from a
+company's documents with citations, through a vendor-neutral model layer with failover,
+versioned prompts and schema-validated structured output. There is no tool use, access
+control or evaluation suite yet. See [docs/PLAN.md](docs/PLAN.md) for the design and the
+milestone list.
 
 ## How it is organised
 
@@ -83,6 +84,37 @@ any provider. It sends the schema through the vendor's native feature, validates
 and retries once with the validation errors if needed. `POST /v1/title` is the first task
 built on it: it names a conversation, on the small tier.
 
+## Retrieval (RAG)
+
+A pack's `docs/` folder holds Markdown files. Optional front matter sets a `title` and
+`labels`:
+
+```markdown
+---
+title: Refund Policy
+labels: []          # [] = public. [internal] or [admin_only] = restricted
+---
+```
+
+`make ingest` builds the index and `make search q="..."` shows what retrieval returns.
+
+- **Ingestion is incremental.** Unchanged files are skipped, edited files are re-embedded,
+  and deleted files are removed from the index, so stale text is never retrieved.
+- **Chunking follows the document.** Files are split on headings, and each chunk keeps its
+  title and heading path.
+- **Search is hybrid.** Semantic search (local embedding model, no API key) and keyword
+  search (BM25 with stemming) are merged with reciprocal rank fusion.
+- **Answers cite their sources.** Retrieved chunks are numbered, the model cites them as
+  `[1]`, and the response lists every source with a `cited` flag.
+- **Restricted documents stay hidden for now.** Labels are stored with every chunk, and until
+  the access layer (M7) exists only unlabelled documents are ever retrieved.
+
+Everything is behind interfaces (`Loader`, `Chunker`, `Embedder`, `ChunkStore`, `Retriever`).
+The shipped store is a zero-install SQLite file with brute-force vector search, which suits
+development and small document sets. A production vector database adapter is not written yet.
+The default embedding model is English-only; set another model in `brain.yaml` for other
+languages.
+
 ## Quick start
 
 Requires [uv](https://docs.astral.sh/uv/) and Python 3.12+.
@@ -90,12 +122,13 @@ Requires [uv](https://docs.astral.sh/uv/) and Python 3.12+.
 ```bash
 make install
 make check      # ruff, mypy, import-linter, pytest
+make ingest     # build the document index (downloads a 67 MB embedding model once)
 make run        # serves examples/edtech on http://127.0.0.1:8000
 curl http://127.0.0.1:8000/healthz
 
 # one JSON answer
 curl http://127.0.0.1:8000/v1/chat -H 'content-type: application/json' \
-  -d '{"stream": false, "messages": [{"role": "user", "content": "Who are you?"}]}'
+  -d '{"stream": false, "messages": [{"role": "user", "content": "How do refunds work?"}]}'
 
 # streamed answer (Server-Sent Events: delta..., then done)
 curl -N http://127.0.0.1:8000/v1/chat -H 'content-type: application/json' \

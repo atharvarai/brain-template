@@ -35,12 +35,15 @@ def test_json_answer_carries_text_and_metadata(pack_dir: Path) -> None:
 
     assert response.status_code == 200
     body = response.json()
-    assert body["text"] == "echo: hello"
+    assert body["text"].endswith("\n\nhello")  # the fake echoes the turn it was sent
+    assert "(no matching documents were found)" in body["text"]
+    assert body["sources"] == []
     assert body["provider"] == "fake"
     assert body["model"] == "fake-1"
     assert body["stop_reason"] == "end"
-    assert body["usage"]["output_tokens"] == 2
-    assert [(p["name"], p["version"]) for p in body["prompts"]] == [("system", 1), ("persona", 1)]
+    assert body["usage"]["output_tokens"] > 0
+    names = [(p["name"], p["version"]) for p in body["prompts"]]
+    assert names == [("system", 2), ("persona", 1), ("rag_turn", 1)]
     assert all(len(p["checksum"]) == 12 for p in body["prompts"])
 
 
@@ -50,10 +53,11 @@ def test_streaming_is_the_default_and_ends_with_done(pack_dir: Path) -> None:
     assert response.headers["content-type"].startswith("text/event-stream")
     events = parse_sse(response.text)
     text = "".join(data["text"] for name, data in events if name == "delta")
-    assert text.strip() == "echo: hello world"
+    assert text.strip().endswith("hello world")
     assert [name for name, _ in events][-1] == "done"
     assert events[-1][1]["provider"] == "fake"
-    assert [p["name"] for p in events[-1][1]["prompts"]] == ["system", "persona"]
+    assert [p["name"] for p in events[-1][1]["prompts"]] == ["system", "persona", "rag_turn"]
+    assert events[-1][1]["sources"] == []
     assert "text" not in events[-1][1]
 
 

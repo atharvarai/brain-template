@@ -7,7 +7,7 @@ from typing import Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from core.config.enums import ModelTier, Provider
+from core.config.enums import EmbedderKind, ModelTier, Provider
 
 
 class _Strict(BaseModel):
@@ -64,6 +64,20 @@ class PromptsConfig(_Strict):
     pinned: dict[str, int] = Field(default_factory=dict)
 
 
+class EmbedderConfig(_Strict):
+    kind: EmbedderKind = EmbedderKind.FASTEMBED
+    model: str = "BAAI/bge-small-en-v1.5"  # used by kinds that load a named model
+
+
+class RagConfig(_Strict):
+    """Retrieval over the company's documents. Leave it out for a brain with no documents."""
+
+    docs: str = "docs"  # folder of Markdown files, relative to the pack root
+    top_k: int = Field(default=5, ge=1, le=20)  # chunks given to the model per question
+    chunk_chars: int = Field(default=1200, ge=100)
+    embedder: EmbedderConfig = Field(default_factory=EmbedderConfig)
+
+
 class BrainConfig(_Strict):
     """Everything a company declares about its brain."""
 
@@ -71,3 +85,4 @@ class BrainConfig(_Strict):
     description: str = ""
     models: ModelsConfig
     prompts: PromptsConfig = Field(default_factory=PromptsConfig)
+    rag: RagConfig | None = None

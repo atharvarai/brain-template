@@ -35,3 +35,30 @@ def pack_dir(tmp_path: Path) -> Path:
 def anyio_backend() -> str:
     """Run async tests on asyncio only."""
     return "asyncio"
+
+
+DOCS = {
+    "returns.md": (
+        "---\ntitle: Returns Policy\nlabels: []\n---\n# Returns Policy\n\n"
+        "## Window\nAnvils can be returned within 30 days of delivery.\n\n"
+        "## Shipping\nReturn shipping is free for damaged anvils.\n"
+    ),
+    "pricing.md": "# Pricing\n\nThe standard anvil costs 120 dollars.\n",
+    "staff/margins.md": (
+        "---\ntitle: Margins\nlabels: [internal]\n---\n# Margins\n\n"
+        "The anvil margin is 62 percent. Returns cost us 9 dollars each.\n"
+    ),
+}
+
+
+@pytest.fixture
+def rag_pack_dir(pack_dir: Path) -> Path:
+    """The Acme pack with a small document set and the model-free hashing embedder."""
+    for name, text in DOCS.items():
+        path = pack_dir / "docs" / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+    config = yaml.safe_load((pack_dir / "brain.yaml").read_text())
+    config["rag"] = {"docs": "docs", "top_k": 3, "embedder": {"kind": "hashing"}}
+    (pack_dir / "brain.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+    return pack_dir

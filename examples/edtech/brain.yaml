@@ -6,6 +6,13 @@ description: Sells courses, mentors learners and helps them get placed.
 # prompts:
 #   pinned: {persona: 1}
 
+# Retrieval over the Markdown files in docs/. Build the index with `make ingest`.
+# Front matter `labels` on a file restricts who may read it (enforced by the access layer).
+rag:
+  docs: docs
+  top_k: 5
+  embedder: {kind: fastembed, model: BAAI/bge-small-en-v1.5}
+
 # Each profile maps every tier to an ordered fallback chain.
 # Pick one with `active`, or override per process with BRAIN_MODEL_PROFILE.
 models:

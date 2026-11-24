@@ -12,3 +12,4 @@ class Settings(BaseSettings):
 
     pack: Path  # BRAIN_PACK: path to the domain pack folder
     model_profile: str | None = None  # BRAIN_MODEL_PROFILE: overrides models.active
+    data_dir: Path = Path(".brain")  # BRAIN_DATA_DIR: where the brain keeps its own data

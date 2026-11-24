@@ -5,6 +5,7 @@ Rendering is strict in both directions (a missing variable and an unused variabl
 errors) and single-pass, so text inserted for one placeholder is never scanned for more.
 """
 
+import html
 import re
 from collections.abc import Mapping
 
@@ -29,11 +30,15 @@ def render(template: str, variables: Mapping[str, str]) -> str:
     return _PLACEHOLDER.sub(lambda match: variables[match.group(1)], template)
 
 
-def wrap_untrusted(tag: str, text: str) -> str:
+def wrap_untrusted(tag: str, text: str, **attributes: str | int) -> str:
     """Wrap text we do not control (user input, documents, tool output) in XML-style tags.
 
     Prompts tell the model that content inside such tags is data, not instructions. The
-    closing tag is neutralised inside ``text`` so the content cannot break out of its wrapper.
+    closing tag is neutralised inside ``text`` so the content cannot break out of its
+    wrapper, and attribute values are escaped for the same reason.
     """
     closing = re.compile(rf"<\s*/\s*{re.escape(tag)}\s*>", re.IGNORECASE)
-    return f"<{tag}>\n{closing.sub(f'[/{tag}]', text)}\n</{tag}>"
+    rendered = "".join(
+        f' {name}="{html.escape(str(value), quote=True)}"' for name, value in attributes.items()
+    )
+    return f"<{tag}{rendered}>\n{closing.sub(f'[/{tag}]', text)}\n</{tag}>"

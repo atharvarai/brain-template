@@ -10,9 +10,9 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, model_validator
 
 from core.api.context import AppContext, get_context
-from core.api.schemas import CallMetadata, ChatMessage
+from core.api.schemas import CallMetadata, ChatMessage, SourceOut
 from core.llm import LLMError, Message, Role, TextDelta
-from core.pipeline import Pipeline
+from core.pipeline import Answer, Pipeline
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1", tags=["chat"])
@@ -29,7 +29,19 @@ class ChatRequest(BaseModel):
         return self
 
 
-class ChatResponse(CallMetadata):
+class ChatMetadata(CallMetadata):
+    """Everything about an answer except its text: sent as the final stream event."""
+
+    sources: list[SourceOut]
+
+    @classmethod
+    def from_answer(cls, answer: Answer) -> Self:
+        base = CallMetadata.build(answer.completion, answer.prompts)
+        sources = [SourceOut.from_source(source) for source in answer.sources]
+        return cls(sources=sources, **base.model_dump())
+
+
+class ChatResponse(ChatMetadata):
     text: str
 
 
@@ -37,13 +49,16 @@ def _sse(event: str, data: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
-def _log_call(metadata: CallMetadata) -> None:
-    # Until the observability layer exists, the prompt versions are recorded in the log.
+def _log_call(metadata: ChatMetadata) -> None:
+    # Until the observability layer exists, prompt versions and sources go to the log.
     logger.info(
-        "chat answered provider=%s model=%s prompts=%s tokens_in=%d tokens_out=%d ms=%d",
+        "chat answered provider=%s model=%s prompts=%s sources=%s cited=%s"
+        " tokens_in=%d tokens_out=%d ms=%d",
         metadata.provider,
         metadata.model,
         ",".join(f"{p.name}@v{p.version}#{p.checksum}" for p in metadata.prompts),
+        ",".join(s.source for s in metadata.sources),
+        ",".join(str(s.index) for s in metadata.sources if s.cited),
         metadata.usage.input_tokens,
         metadata.usage.output_tokens,
         metadata.latency_ms,
@@ -57,7 +72,7 @@ async def _event_stream(pipeline: Pipeline, messages: list[Message]) -> AsyncIte
             if isinstance(event, TextDelta):
                 yield _sse("delta", {"text": event.text})
             else:
-                metadata = CallMetadata.build(event, pipeline.prompt_refs)
+                metadata = ChatMetadata.from_answer(event)
                 _log_call(metadata)
                 yield _sse("done", metadata.model_dump())
     except LLMError:
@@ -78,7 +93,7 @@ async def chat(
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
-    completion = await pipeline.answer(messages)
-    metadata = CallMetadata.build(completion, pipeline.prompt_refs)
+    answer = await pipeline.answer(messages)
+    metadata = ChatMetadata.from_answer(answer)
     _log_call(metadata)
-    return ChatResponse(text=completion.text, **metadata.model_dump())
+    return ChatResponse(text=answer.completion.text, **metadata.model_dump())

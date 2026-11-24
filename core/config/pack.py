@@ -26,6 +26,10 @@ class DomainPack:
     def prompts_dir(self) -> Path:
         return self.root / "prompts"
 
+    @property
+    def docs_dir(self) -> Path | None:
+        return self.root / self.config.rag.docs if self.config.rag else None
+
 
 def load_pack(root: Path) -> DomainPack:
     """Load and validate the pack at ``root``. Raises ``PackError`` with a clear reason."""

@@ -1,6 +1,6 @@
 # Brain Template: Repo Plan
 
-Status: approved 2026-11-25. M0 to M2 built; see section 8.
+Status: approved 2026-11-25. M0 to M3 built; see section 8.
 
 ## 1. Goal
 
@@ -51,7 +51,7 @@ flowchart LR
 | 5 | Tools only via MCP | Industry-agnostic by construction: core never names a tool | Company must run an MCP server |
 | 6 | Model-agnostic provider layer: `Provider` and `ModelTier` enums, one adapter per provider (Claude Code CLI, Anthropic, OpenAI, Ollama, Fake), chosen by config | Switching vendor is a config change; code asks for a tier, never a model name | Each adapter must map tool calling and usage into our own types |
 | 6a | Development and the author's testing use the Claude Code CLI adapter (`claude -p` on a subscription) | No API key and no cost for the author | CLI adapter has no native tool-calling loop control; tool and agent milestones may need Ollama or another adapter |
-| 7 | Local embeddings by default (sentence-transformers) | Free, no second vendor; interface allows a hosted embedder | Lower retrieval quality than top hosted embedders |
+| 7 | Local embeddings by default (fastembed, ONNX) | Free, no second vendor, no PyTorch install; interface allows a hosted embedder | Lower retrieval quality than top hosted embedders; default model is English-only |
 | 8 | Cache behind an interface, stored in the same local or Postgres store; Redis adapter later | Fewer moving parts | Slower than Redis; fine at demo scale |
 | 9 | Own trace table + JSON logs; optional OpenTelemetry export | Works with zero extra services; companies plug in their own backend | No trace UI out of the box |
 | 10 | A company is a "domain pack" folder + one `brain.yaml` | Makes "what do I change?" a single folder | Config schema must stay small and stable |
@@ -182,7 +182,7 @@ Each milestone ends with a runnable state and tests.
 | M0 | Skeleton (done) | Repo, pyproject, `/healthz`, CI running lint + types + boundary tests, pack loader reads `brain.yaml`, provider and tier enums |
 | M1 | Model (01) (done) | `/v1/chat` streams an answer through `LLMProvider`; Claude Code CLI, Anthropic, OpenAI and Ollama adapters built by a factory from the `Provider` enum; fallback chain with circuit breaker; fake LLM for tests |
 | M2 | Prompt (02) (done) | System prompt composed from a core skeleton and the pack's persona file, versioned by filename with optional pins; structured output for one task (conversation titles); prompt name, version and checksum reported per request |
-| M3 | RAG (03) | `make ingest` loads, chunks, embeds the ed-tech docs; answers cite sources; says "I don't know" when retrieval is empty |
+| M3 | RAG (03) (done) | `make ingest` loads, chunks, embeds the ed-tech docs; answers cite sources; says it does not know when the documents lack the answer. Built thin: Markdown loader only, SQLite store only, public documents only until M7. Not yet: PDF loader, production vector store adapter, reranking, query rewriting for follow-up questions |
 | M4 | Observability + evals (09) | Every request writes a trace (tokens, cost, latency, prompt version, chunk ids); `make eval` runs the pack's cases and prints a pass rate; CI fails below a threshold |
 | M5 | Tools (04) | Demo MCP server for ed-tech; brain discovers tools and completes a single tool round trip; tool errors handled |
 | M6 | Agent (05) | Multi-step tasks work within step and token budgets; write tools pause for approval; per-step traces |

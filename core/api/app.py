@@ -19,7 +19,10 @@ from core.llm import (
 )
 from core.pipeline import Pipeline
 from core.prompts import ChainedPromptStore, FilePromptStore, build_system_prompt, builtin_store
+from core.rag import NullRetriever, Retriever, build_rag
 from core.tasks.title import TITLE_PROMPT, TitleGenerator
+
+RAG_TURN_PROMPT = "rag_turn"
 
 logger = logging.getLogger(__name__)
 
@@ -40,10 +43,23 @@ def build_context(settings: Settings, provider_factory: ProviderFactory) -> AppC
     prompts = ChainedPromptStore(
         [FilePromptStore(pack.prompts_dir, pack.config.prompts.pinned), builtin_store()]
     )
+    rag = build_rag(pack, settings.data_dir)
+    retriever: Retriever = NullRetriever()
+    if rag is not None:
+        retriever = rag.retriever
+        if rag.store.count() == 0:
+            logger.warning("the document index is empty: run `make ingest` to build it")
+
     return AppContext(
         pack=pack,
         model_profile=profile,
-        pipeline=Pipeline(gateway, build_system_prompt(prompts, pack.config)),
+        pipeline=Pipeline(
+            gateway,
+            build_system_prompt(prompts, pack.config),
+            retriever,
+            turn_prompt=prompts.get(RAG_TURN_PROMPT),
+            top_k=rag.top_k if rag else 1,
+        ),
         title_generator=TitleGenerator(
             gateway.for_tier(ModelTier.SMALL), prompts.get(TITLE_PROMPT)
         ),

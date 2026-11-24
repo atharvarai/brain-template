@@ -54,6 +54,14 @@ def test_wrap_untrusted_cannot_be_escaped() -> None:
     assert "[/document]" in wrapped
 
 
+def test_wrap_untrusted_escapes_attribute_values() -> None:
+    wrapped = wrap_untrusted("document", "text", index=1, title='Fees "2026" <b> & more')
+
+    assert wrapped.startswith(
+        '<document index="1" title="Fees &quot;2026&quot; &lt;b&gt; &amp; more">\n'
+    )
+
+
 # --- store -------------------------------------------------------------------------------
 
 
@@ -117,7 +125,7 @@ def test_system_prompt_combines_skeleton_and_persona(tmp_path: Path) -> None:
     assert "You are the AI assistant for Acme. Sells anvils." in composed.text
     assert "<persona>\nTalk like a pirate.\n</persona>" in composed.text
     assert "{{" not in composed.text
-    assert [(ref.name, ref.version) for ref in composed.refs] == [("system", 1), ("persona", 3)]
+    assert [(ref.name, ref.version) for ref in composed.refs] == [("system", 2), ("persona", 3)]
 
 
 def test_a_pack_without_a_persona_fails_at_startup(tmp_path: Path) -> None:
@@ -132,3 +140,5 @@ def test_builtin_prompts_render_with_exactly_their_declared_variables() -> None:
 
     assert placeholders(store.get("system").template) == {"brain_name", "description", "persona"}
     assert placeholders(store.get("title").template) == set()
+    assert placeholders(store.get("rag_turn").template) == {"documents", "question"}
+    assert store.get("system").version == 2  # v1 stays on disk for rollback

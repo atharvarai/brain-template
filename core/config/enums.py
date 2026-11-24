@@ -13,6 +13,13 @@ class Provider(StrEnum):
     FAKE = "fake"  # deterministic, for tests
 
 
+class EmbedderKind(StrEnum):
+    """Which embedding implementation turns text into vectors for retrieval."""
+
+    FASTEMBED = "fastembed"  # local ONNX model, free and offline
+    HASHING = "hashing"  # word hashing, no model: tests and smoke runs only
+
+
 class ModelTier(StrEnum):
     """How capable a model a task needs. Features ask for a tier, never for a model."""
 

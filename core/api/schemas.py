@@ -6,6 +6,7 @@ from pydantic import BaseModel, Field
 
 from core.llm import Completion, Message, Role
 from core.prompts import PromptRef
+from core.rag import Source
 
 
 class ChatMessage(BaseModel):
@@ -29,6 +30,26 @@ class PromptRefOut(BaseModel):
     @classmethod
     def from_ref(cls, ref: PromptRef) -> Self:
         return cls(name=ref.name, version=ref.version, checksum=ref.checksum)
+
+
+class SourceOut(BaseModel):
+    """A document section the answer could draw on. ``index`` matches citations like [1]."""
+
+    index: int
+    source: str
+    title: str
+    section: str
+    cited: bool
+
+    @classmethod
+    def from_source(cls, source: Source) -> Self:
+        return cls(
+            index=source.index,
+            source=source.source,
+            title=source.title,
+            section=source.section,
+            cited=source.cited,
+        )
 
 
 class CallMetadata(BaseModel):
