@@ -1,6 +1,6 @@
 # Brain Template: Repo Plan
 
-Status: approved 2026-11-25. M0 (skeleton) built; see section 8.
+Status: approved 2026-11-25. M0 and M1 built; see section 8.
 
 ## 1. Goal
 
@@ -180,7 +180,7 @@ Each milestone ends with a runnable state and tests.
 | # | Milestone | Done when |
 |---|---|---|
 | M0 | Skeleton (done) | Repo, pyproject, `/healthz`, CI running lint + types + boundary tests, pack loader reads `brain.yaml`, provider and tier enums |
-| M1 | Model (01) | `/v1/chat` streams an answer through `LLMProvider`; Claude Code CLI, Anthropic, OpenAI and Ollama adapters built by a factory from the `Provider` enum; fallback chain with circuit breaker; fake LLM for tests |
+| M1 | Model (01) (done) | `/v1/chat` streams an answer through `LLMProvider`; Claude Code CLI, Anthropic, OpenAI and Ollama adapters built by a factory from the `Provider` enum; fallback chain with circuit breaker; fake LLM for tests |
 | M2 | Prompt (02) | System prompt rendered from the pack's files with a version; structured output for one task; prompt version recorded per request |
 | M3 | RAG (03) | `make ingest` loads, chunks, embeds the ed-tech docs; answers cite sources; says "I don't know" when retrieval is empty |
 | M4 | Observability + evals (09) | Every request writes a trace (tokens, cost, latency, prompt version, chunk ids); `make eval` runs the pack's cases and prints a pass rate; CI fails below a threshold |

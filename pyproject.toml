@@ -7,17 +7,28 @@ license = "MIT"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.115",
+    "httpx2>=2.16.2",
     "pydantic>=2.9",
     "pydantic-settings>=2.6",
     "pyyaml>=6.0",
     "uvicorn>=0.32",
 ]
 
+[project.optional-dependencies]
+anthropic = [
+    "anthropic>=2.13.0",
+]
+openai = [
+    "openai>=3.59.0",
+]
+
 [dependency-groups]
 dev = [
+    "anthropic>=2.13.0",
     "httpx2>=1.0",
     "import-linter>=2.1",
     "mypy>=1.13",
+    "openai>=3.59.0",
     "pytest>=8.3",
     "ruff>=0.8",
     "types-pyyaml>=6.0",

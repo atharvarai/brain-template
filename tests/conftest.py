@@ -27,3 +27,9 @@ def pack_dir(tmp_path: Path) -> Path:
     (tmp_path / "prompts").mkdir()
     (tmp_path / "prompts" / "system.md").write_text("You are a test assistant.", encoding="utf-8")
     return tmp_path
+
+
+@pytest.fixture
+def anyio_backend() -> str:
+    """Run async tests on asyncio only."""
+    return "asyncio"
