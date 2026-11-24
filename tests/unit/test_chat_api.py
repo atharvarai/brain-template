@@ -40,6 +40,8 @@ def test_json_answer_carries_text_and_metadata(pack_dir: Path) -> None:
     assert body["model"] == "fake-1"
     assert body["stop_reason"] == "end"
     assert body["usage"]["output_tokens"] == 2
+    assert [(p["name"], p["version"]) for p in body["prompts"]] == [("system", 1), ("persona", 1)]
+    assert all(len(p["checksum"]) == 12 for p in body["prompts"])
 
 
 def test_streaming_is_the_default_and_ends_with_done(pack_dir: Path) -> None:
@@ -51,6 +53,7 @@ def test_streaming_is_the_default_and_ends_with_done(pack_dir: Path) -> None:
     assert text.strip() == "echo: hello world"
     assert [name for name, _ in events][-1] == "done"
     assert events[-1][1]["provider"] == "fake"
+    assert [p["name"] for p in events[-1][1]["prompts"]] == ["system", "persona"]
     assert "text" not in events[-1][1]
 
 
@@ -66,7 +69,9 @@ def test_the_pack_system_prompt_reaches_the_model(pack_dir: Path) -> None:
     )
 
     sent = [request for provider in built for request in provider.requests]
-    assert [request.system for request in sent] == ["You are a test assistant."]
+    assert len(sent) == 1
+    assert "You are the AI assistant for Acme." in sent[0].system  # the core skeleton
+    assert "You are a test assistant." in sent[0].system  # the pack's persona
 
 
 def test_bad_requests_are_rejected_before_any_model_call(pack_dir: Path) -> None:

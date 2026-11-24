@@ -167,6 +167,15 @@ class ClaudeCodeProvider:
         yield self._completion(final, start)
 
     def _args(self, request: LLMRequest, output_format: str) -> list[str]:
+        structured = (
+            ["--json-schema", json.dumps(request.json_schema)] if request.json_schema else []
+        )
+        return [
+            *self._base_args(request, output_format),
+            *structured,
+        ]
+
+    def _base_args(self, request: LLMRequest, output_format: str) -> list[str]:
         return [
             self._binary,
             "-p",
@@ -200,11 +209,19 @@ class ClaudeCodeProvider:
             int(usage.get(key) or 0)
             for key in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
         )
+        # With --json-schema the CLI returns the object in `structured_output` and reports
+        # its internal stop reason, so a present object counts as a normal finish.
+        structured = payload.get("structured_output")
+        if structured is not None:
+            text, stop_reason = json.dumps(structured), StopReason.END
+        else:
+            text = str(payload.get("result", ""))
+            stop_reason = _STOP_REASONS.get(str(payload.get("stop_reason")), StopReason.OTHER)
         return Completion(
-            text=str(payload.get("result", "")),
+            text=text,
             spec=self._spec,
             usage=Usage(input_tokens, int(usage.get("output_tokens") or 0)),
-            stop_reason=_STOP_REASONS.get(str(payload.get("stop_reason")), StopReason.OTHER),
+            stop_reason=stop_reason,
             latency_ms=int((time.perf_counter() - start) * 1000),
         )
 

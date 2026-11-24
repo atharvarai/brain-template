@@ -73,7 +73,9 @@ class OllamaProvider:
         yield self._completion("".join(parts), final, start)
 
     def _payload(self, request: LLMRequest, stream: bool) -> dict[str, Any]:
+        structured = {"format": request.json_schema} if request.json_schema else {}
         return {
+            **structured,
             "model": self._spec.model,
             "messages": [
                 {"role": "system", "content": request.system},

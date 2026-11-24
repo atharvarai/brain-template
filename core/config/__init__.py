@@ -2,7 +2,7 @@
 
 from core.config.enums import ModelTier, Provider
 from core.config.pack import DomainPack, PackError, load_pack
-from core.config.schema import BrainConfig, ModelsConfig, ModelSpec
+from core.config.schema import BrainConfig, ModelsConfig, ModelSpec, PromptsConfig
 from core.config.settings import Settings
 
 __all__ = [
@@ -12,6 +12,7 @@ __all__ = [
     "ModelTier",
     "ModelsConfig",
     "PackError",
+    "PromptsConfig",
     "Provider",
     "Settings",
     "load_pack",

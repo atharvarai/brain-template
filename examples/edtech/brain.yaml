@@ -1,7 +1,10 @@
 # Domain pack for Skilvanta, a FICTIONAL ed-tech company. All data here is synthetic.
 name: Skilvanta
 description: Sells courses, mentors learners and helps them get placed.
-system_prompt: prompts/system.md
+
+# Prompt files live in prompts/ as <name>.v<N>.md. The newest version is used unless pinned:
+# prompts:
+#   pinned: {persona: 1}
 
 # Each profile maps every tier to an ordered fallback chain.
 # Pick one with `active`, or override per process with BRAIN_MODEL_PROFILE.

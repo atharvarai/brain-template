@@ -6,10 +6,10 @@ Clone it, add one folder that describes your company (docs, tools, roles, prompt
 cases), and you get an assistant built from clearly separated AI layers: model, prompts,
 RAG, tools (MCP), agent, access control, guardrails, cache and router, observability and evals.
 
-**Status: early.** Milestones M0 (skeleton) and M1 (model layer) are done: the service
-answers chat requests through a vendor-neutral model layer with failover. There is no
-retrieval, tool use or access control yet. See [docs/PLAN.md](docs/PLAN.md) for the design
-and the milestone list.
+**Status: early.** Milestones M0 to M2 are done: the service answers chat requests through
+a vendor-neutral model layer with failover, using versioned prompts, and can return
+schema-validated structured output. There is no retrieval, tool use or access control yet.
+See [docs/PLAN.md](docs/PLAN.md) for the design and the milestone list.
 
 ## How it is organised
 
@@ -58,6 +58,31 @@ The Claude Code, fake and failover paths are tested against the real thing. The 
 OpenAI and Ollama adapters are tested with mocked HTTP only; they have not been run against
 the live services.
 
+## Prompts
+
+Prompts are files, versioned by filename: `<name>.v<version>.md`.
+
+- `core/prompts/builtin/` holds generic skeletons. `system.v1.md` carries the rules every
+  brain follows and has slots for the company name, description and persona.
+- A pack's `prompts/` folder holds the company's own text. `persona.v1.md` is required. A
+  pack can also override any built-in prompt by adding a file with the same name.
+- The newest version is used unless `brain.yaml` pins one (`prompts: {pinned: {persona: 1}}`),
+  so rolling back a bad prompt change is a one-line edit.
+- Every answer reports the name, version and checksum of each prompt behind it. The checksum
+  changes if someone edits a file without bumping its version.
+
+Templates only support `{{name}}` placeholders. Rendering fails on a missing or an unused
+variable, and inserted text is never rendered again. Text the service does not control (user
+input, and later documents and tool results) is wrapped in XML-style tags that it cannot
+close early, and the prompts tell the model to treat tagged content as data.
+
+## Structured output
+
+`complete_structured(provider, request, SomePydanticModel)` returns a validated object from
+any provider. It sends the schema through the vendor's native feature, validates the reply,
+and retries once with the validation errors if needed. `POST /v1/title` is the first task
+built on it: it names a conversation, on the small tier.
+
 ## Quick start
 
 Requires [uv](https://docs.astral.sh/uv/) and Python 3.12+.
@@ -75,6 +100,10 @@ curl http://127.0.0.1:8000/v1/chat -H 'content-type: application/json' \
 # streamed answer (Server-Sent Events: delta..., then done)
 curl -N http://127.0.0.1:8000/v1/chat -H 'content-type: application/json' \
   -d '{"messages": [{"role": "user", "content": "Who are you?"}]}'
+
+# structured output: a title for a conversation
+curl http://127.0.0.1:8000/v1/title -H 'content-type: application/json' \
+  -d '{"messages": [{"role": "user", "content": "How do refunds work?"}]}'
 ```
 
 The example pack defaults to the `claude_code` profile. Without the Claude Code CLI, run

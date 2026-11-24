@@ -20,7 +20,8 @@ def test_loads_a_valid_pack(pack_dir: Path) -> None:
     assert pack.config.name == "Acme"
     chain = pack.config.models.chain(ModelTier.SMALL)
     assert chain[0].provider is Provider.FAKE
-    assert pack.system_prompt_path.read_text() == "You are a test assistant."
+    assert pack.prompts_dir == pack_dir.resolve() / "prompts"
+    assert pack.config.prompts.pinned == {}
 
 
 def test_chain_can_be_read_from_a_non_active_profile(pack_dir: Path) -> None:
@@ -73,8 +74,7 @@ def test_unknown_provider_and_unknown_keys_are_rejected(pack_dir: Path) -> None:
         load_pack(pack_dir)
 
 
-def test_missing_system_prompt_is_reported(pack_dir: Path) -> None:
-    (pack_dir / "prompts" / "system.md").unlink()
+def test_prompt_versions_can_be_pinned(pack_dir: Path) -> None:
+    _rewrite(pack_dir, lambda c: c.update(prompts={"pinned": {"persona": 1}}))
 
-    with pytest.raises(PackError, match="system prompt file not found"):
-        load_pack(pack_dir)
+    assert load_pack(pack_dir).config.prompts.pinned == {"persona": 1}

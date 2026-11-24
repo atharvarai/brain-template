@@ -54,10 +54,20 @@ class ModelsConfig(_Strict):
         return self.profiles[name][tier]
 
 
+class PromptsConfig(_Strict):
+    """Prompt files live in the pack's ``prompts/`` folder as ``<name>.v<version>.md``.
+
+    The newest version of each prompt is used unless it is pinned here, which is how a
+    bad prompt change gets rolled back without deleting the file.
+    """
+
+    pinned: dict[str, int] = Field(default_factory=dict)
+
+
 class BrainConfig(_Strict):
     """Everything a company declares about its brain."""
 
     name: str = Field(min_length=1)
     description: str = ""
-    system_prompt: str = "prompts/system.md"  # path relative to the pack root
     models: ModelsConfig
+    prompts: PromptsConfig = Field(default_factory=PromptsConfig)

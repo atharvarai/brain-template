@@ -10,16 +10,12 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, model_validator
 
 from core.api.context import AppContext, get_context
-from core.llm import Completion, LLMError, Message, Role, TextDelta
+from core.api.schemas import CallMetadata, ChatMessage
+from core.llm import LLMError, Message, Role, TextDelta
 from core.pipeline import Pipeline
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1", tags=["chat"])
-
-
-class ChatMessage(BaseModel):
-    role: Role
-    content: str = Field(min_length=1)
 
 
 class ChatRequest(BaseModel):
@@ -32,40 +28,26 @@ class ChatRequest(BaseModel):
             raise ValueError("the last message must have role 'user'")
         return self
 
-    def to_messages(self) -> list[Message]:
-        return [Message(m.role, m.content) for m in self.messages]
 
-
-class UsageOut(BaseModel):
-    input_tokens: int
-    output_tokens: int
-
-
-class ChatResponse(BaseModel):
+class ChatResponse(CallMetadata):
     text: str
-    provider: str
-    model: str
-    stop_reason: str
-    usage: UsageOut
-    latency_ms: int
-
-    @classmethod
-    def from_completion(cls, completion: Completion) -> Self:
-        return cls(
-            text=completion.text,
-            provider=completion.spec.provider.value,
-            model=completion.spec.model,
-            stop_reason=completion.stop_reason.value,
-            usage=UsageOut(
-                input_tokens=completion.usage.input_tokens,
-                output_tokens=completion.usage.output_tokens,
-            ),
-            latency_ms=completion.latency_ms,
-        )
 
 
 def _sse(event: str, data: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
+
+
+def _log_call(metadata: CallMetadata) -> None:
+    # Until the observability layer exists, the prompt versions are recorded in the log.
+    logger.info(
+        "chat answered provider=%s model=%s prompts=%s tokens_in=%d tokens_out=%d ms=%d",
+        metadata.provider,
+        metadata.model,
+        ",".join(f"{p.name}@v{p.version}#{p.checksum}" for p in metadata.prompts),
+        metadata.usage.input_tokens,
+        metadata.usage.output_tokens,
+        metadata.latency_ms,
+    )
 
 
 async def _event_stream(pipeline: Pipeline, messages: list[Message]) -> AsyncIterator[str]:
@@ -75,8 +57,9 @@ async def _event_stream(pipeline: Pipeline, messages: list[Message]) -> AsyncIte
             if isinstance(event, TextDelta):
                 yield _sse("delta", {"text": event.text})
             else:
-                done = ChatResponse.from_completion(event).model_dump(exclude={"text"})
-                yield _sse("done", done)
+                metadata = CallMetadata.build(event, pipeline.prompt_refs)
+                _log_call(metadata)
+                yield _sse("done", metadata.model_dump())
     except LLMError:
         # Headers are already sent, so the failure has to travel inside the stream.
         logger.exception("chat stream failed")
@@ -87,11 +70,15 @@ async def _event_stream(pipeline: Pipeline, messages: list[Message]) -> AsyncIte
 async def chat(
     body: ChatRequest, context: Annotated[AppContext, Depends(get_context)]
 ) -> ChatResponse | StreamingResponse:
-    messages = body.to_messages()
+    pipeline = context.pipeline
+    messages = [message.to_message() for message in body.messages]
     if body.stream:
         return StreamingResponse(
-            _event_stream(context.pipeline, messages),
+            _event_stream(pipeline, messages),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
-    return ChatResponse.from_completion(await context.pipeline.answer(messages))
+    completion = await pipeline.answer(messages)
+    metadata = CallMetadata.build(completion, pipeline.prompt_refs)
+    _log_call(metadata)
+    return ChatResponse(text=completion.text, **metadata.model_dump())

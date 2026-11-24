@@ -9,7 +9,15 @@ import openai
 import pytest
 
 from core.config import Provider
-from core.llm import LLMProvider, ProviderRequestError, ProviderUnavailableError, StopReason
+from core.llm import (
+    LLMProvider,
+    LLMRequest,
+    Message,
+    ProviderRequestError,
+    ProviderUnavailableError,
+    Role,
+    StopReason,
+)
 from core.llm.adapters.anthropic_adapter import AnthropicProvider
 from core.llm.adapters.ollama import OllamaProvider
 from core.llm.adapters.openai_adapter import OpenAIProvider
@@ -225,3 +233,36 @@ async def test_ollama_uses_the_configured_host(monkeypatch) -> None:
     await OllamaProvider(spec(Provider.OLLAMA, "llama-x"), client=http(handler)).complete(request())
 
     assert urls == ["http://gpu-box:11434/api/chat"]
+
+
+@pytest.mark.parametrize(
+    ("build", "body", "locate"),
+    [
+        pytest.param(
+            anthropic_provider, ANTHROPIC_MESSAGE,
+            lambda sent: sent["output_config"]["format"], id="anthropic",
+        ),
+        pytest.param(
+            openai_provider, OPENAI_COMPLETION,
+            lambda sent: sent["response_format"]["json_schema"], id="openai",
+        ),
+        pytest.param(ollama_provider, OLLAMA_COMPLETION, lambda sent: sent, id="ollama"),
+    ],
+)  # fmt: skip
+async def test_json_schema_uses_the_vendor_native_feature(build, body, locate) -> None:
+    schema = {"type": "object", "properties": {"title": {"type": "string"}}}
+    sent: list[dict] = []
+
+    def handler(req: httpx2.Request) -> httpx2.Response:
+        sent.append(json.loads(req.content))
+        return httpx2.Response(200, json=body)
+
+    provider = build(handler)
+    await provider.complete(request())
+    structured = LLMRequest("s", (Message(Role.USER, "x"),), json_schema=schema)
+    await provider.complete(structured)
+
+    plain, with_schema = sent
+    assert not {"output_config", "response_format", "format"} & plain.keys()
+    carrier = locate(with_schema)
+    assert carrier.get("schema", carrier.get("format")) == schema

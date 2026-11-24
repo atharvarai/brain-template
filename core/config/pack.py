@@ -23,8 +23,8 @@ class DomainPack:
     config: BrainConfig
 
     @property
-    def system_prompt_path(self) -> Path:
-        return self.root / self.config.system_prompt
+    def prompts_dir(self) -> Path:
+        return self.root / "prompts"
 
 
 def load_pack(root: Path) -> DomainPack:
@@ -49,7 +49,4 @@ def load_pack(root: Path) -> DomainPack:
     except ValidationError as exc:
         raise PackError(f"{config_path} is invalid:\n{exc}") from exc
 
-    pack = DomainPack(root=root, config=config)
-    if not pack.system_prompt_path.is_file():
-        raise PackError(f"system prompt file not found: {pack.system_prompt_path}")
-    return pack
+    return DomainPack(root=root, config=config)

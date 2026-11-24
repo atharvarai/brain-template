@@ -2,6 +2,7 @@
 
 import time
 from collections.abc import AsyncIterator
+from typing import Any
 
 import openai
 from openai.types.chat import ChatCompletionMessageParam
@@ -46,6 +47,7 @@ class OpenAIProvider:
                 model=self._spec.model,
                 messages=_to_params(request),
                 max_completion_tokens=request.max_tokens,
+                **_structured_output(request),
             )
         except openai.APIConnectionError as exc:  # includes timeouts
             raise ProviderUnavailableError(f"{self.name}: {exc}") from exc
@@ -73,6 +75,7 @@ class OpenAIProvider:
                 max_completion_tokens=request.max_tokens,
                 stream=True,
                 stream_options={"include_usage": True},
+                **_structured_output(request),
             )
             async for chunk in chunks:
                 if chunk.usage:  # arrives on the last chunk, which has no choices
@@ -98,6 +101,13 @@ class OpenAIProvider:
             stop_reason=_STOP_REASONS.get(str(finish_reason), StopReason.OTHER),
             latency_ms=int((time.perf_counter() - start) * 1000),
         )
+
+
+def _structured_output(request: LLMRequest) -> dict[str, Any]:
+    if request.json_schema is None:
+        return {}
+    json_schema = {"name": "output", "schema": request.json_schema, "strict": True}
+    return {"response_format": {"type": "json_schema", "json_schema": json_schema}}
 
 
 def _to_params(request: LLMRequest) -> list[ChatCompletionMessageParam]:

@@ -24,6 +24,10 @@ class ProviderRequestError(LLMError):
     """The provider rejected the request itself (bad input, bad credentials)."""
 
 
+class StructuredOutputError(LLMError):
+    """The model did not produce output matching the requested schema."""
+
+
 class AllProvidersFailedError(ProviderUnavailableError):
     """Every provider in a fallback chain was unavailable."""
 

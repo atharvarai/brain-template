@@ -7,6 +7,7 @@ from fastapi import Request
 
 from core.config import DomainPack
 from core.pipeline import Pipeline
+from core.tasks.title import TitleGenerator
 
 
 @dataclass(frozen=True)
@@ -16,6 +17,7 @@ class AppContext:
     pack: DomainPack
     model_profile: str
     pipeline: Pipeline
+    title_generator: TitleGenerator
 
 
 def get_context(request: Request) -> AppContext:

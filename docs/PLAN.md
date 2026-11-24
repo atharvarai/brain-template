@@ -1,6 +1,6 @@
 # Brain Template: Repo Plan
 
-Status: approved 2026-11-25. M0 and M1 built; see section 8.
+Status: approved 2026-11-25. M0 to M2 built; see section 8.
 
 ## 1. Goal
 
@@ -126,7 +126,7 @@ Everything a company changes lives in one folder:
 examples/edtech/
   brain.yaml          # name, persona file, model per tier, router rules, guardrail
                       # settings, budgets, which loaders to run
-  prompts/            # system.md and any task prompts (versioned by filename)
+  prompts/            # persona.v1.md (required) and overrides of built-in prompts
   docs/               # the corpus. Front matter on each file sets `labels`
   policy.yaml         # role -> readable labels, role -> callable tools, tools needing approval
   mcp_server/         # demo stand-in for the company backend: fake data + MCP tools
@@ -181,7 +181,7 @@ Each milestone ends with a runnable state and tests.
 |---|---|---|
 | M0 | Skeleton (done) | Repo, pyproject, `/healthz`, CI running lint + types + boundary tests, pack loader reads `brain.yaml`, provider and tier enums |
 | M1 | Model (01) (done) | `/v1/chat` streams an answer through `LLMProvider`; Claude Code CLI, Anthropic, OpenAI and Ollama adapters built by a factory from the `Provider` enum; fallback chain with circuit breaker; fake LLM for tests |
-| M2 | Prompt (02) | System prompt rendered from the pack's files with a version; structured output for one task; prompt version recorded per request |
+| M2 | Prompt (02) (done) | System prompt composed from a core skeleton and the pack's persona file, versioned by filename with optional pins; structured output for one task (conversation titles); prompt name, version and checksum reported per request |
 | M3 | RAG (03) | `make ingest` loads, chunks, embeds the ed-tech docs; answers cite sources; says "I don't know" when retrieval is empty |
 | M4 | Observability + evals (09) | Every request writes a trace (tokens, cost, latency, prompt version, chunk ids); `make eval` runs the pack's cases and prints a pass rate; CI fails below a threshold |
 | M5 | Tools (04) | Demo MCP server for ed-tech; brain discovers tools and completes a single tool round trip; tool errors handled |

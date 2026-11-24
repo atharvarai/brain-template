@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from enum import StrEnum
+from typing import Any
 
 from core.config import ModelSpec
 
@@ -31,6 +32,9 @@ class LLMRequest:
     system: str
     messages: tuple[Message, ...]
     max_tokens: int = 2048
+    # When set, the answer text must be JSON matching this schema. Adapters pass it to the
+    # vendor's native structured-output feature; see ``core.llm.structured``.
+    json_schema: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if not self.messages:

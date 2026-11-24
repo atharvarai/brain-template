@@ -25,7 +25,9 @@ def pack_dir(tmp_path: Path) -> Path:
     }
     (tmp_path / "brain.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
     (tmp_path / "prompts").mkdir()
-    (tmp_path / "prompts" / "system.md").write_text("You are a test assistant.", encoding="utf-8")
+    (tmp_path / "prompts" / "persona.v1.md").write_text(
+        "You are a test assistant.", encoding="utf-8"
+    )
     return tmp_path
 
 

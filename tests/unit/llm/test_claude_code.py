@@ -5,6 +5,7 @@ import pytest
 
 from core.config import Provider
 from core.llm import (
+    LLMRequest,
     Message,
     ProviderRequestError,
     ProviderUnavailableError,
@@ -161,3 +162,25 @@ async def test_subprocess_runner_hides_the_api_key_and_pipes_stdin(monkeypatch) 
 async def test_subprocess_runner_times_out() -> None:
     with pytest.raises(TimeoutError):
         await SubprocessRunner().run(["python3", "-c", "import time; time.sleep(5)"], "", 0.2)
+
+
+async def test_structured_output_passes_the_schema_and_reads_the_object() -> None:
+    schema = {"type": "object", "properties": {"title": {"type": "string"}}}
+    payload = {**RESULT, "stop_reason": "tool_use", "structured_output": {"title": "Refund"}}
+    runner = StubRunner(ok(payload))
+    structured = LLMRequest("s", (Message(Role.USER, "x"),), json_schema=schema)
+
+    completion = await provider(runner).complete(structured)
+
+    assert json.loads(completion.text) == {"title": "Refund"}
+    assert completion.stop_reason is StopReason.END
+    args, _ = runner.calls[0]
+    assert json.loads(args[args.index("--json-schema") + 1]) == schema
+    plain_args = await _args_for(request())
+    assert "--json-schema" not in plain_args
+
+
+async def _args_for(req: LLMRequest) -> list[str]:
+    runner = StubRunner(ok(RESULT))
+    await provider(runner).complete(req)
+    return runner.calls[0][0]

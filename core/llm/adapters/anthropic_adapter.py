@@ -2,6 +2,7 @@
 
 import time
 from collections.abc import AsyncIterator
+from typing import Any
 
 import anthropic
 from anthropic.types import Message as AnthropicMessage
@@ -49,6 +50,7 @@ class AnthropicProvider:
                 max_tokens=request.max_tokens,
                 system=request.system,
                 messages=_to_params(request),
+                **_structured_output(request),
             )
         except anthropic.APIConnectionError as exc:  # includes timeouts
             raise ProviderUnavailableError(f"{self.name}: {exc}") from exc
@@ -64,6 +66,7 @@ class AnthropicProvider:
                 max_tokens=request.max_tokens,
                 system=request.system,
                 messages=_to_params(request),
+                **_structured_output(request),
             ) as stream:
                 async for text in stream.text_stream:
                     yield TextDelta(text)
@@ -88,6 +91,12 @@ class AnthropicProvider:
             stop_reason=_STOP_REASONS.get(str(message.stop_reason), StopReason.OTHER),
             latency_ms=int((time.perf_counter() - start) * 1000),
         )
+
+
+def _structured_output(request: LLMRequest) -> dict[str, Any]:
+    if request.json_schema is None:
+        return {}
+    return {"output_config": {"format": {"type": "json_schema", "schema": request.json_schema}}}
 
 
 def _to_params(request: LLMRequest) -> list[MessageParam]:

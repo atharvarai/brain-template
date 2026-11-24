@@ -6,11 +6,13 @@ from core.llm.errors import (
     LLMError,
     ProviderRequestError,
     ProviderUnavailableError,
+    StructuredOutputError,
 )
 from core.llm.factory import ProviderFactory, default_factory
 from core.llm.fallback import CircuitBreaker, FallbackChain
 from core.llm.gateway import ModelGateway
 from core.llm.provider import LLMProvider
+from core.llm.structured import complete_structured, strict_json_schema
 from core.llm.types import (
     Completion,
     LLMRequest,
@@ -39,7 +41,10 @@ __all__ = [
     "Role",
     "StopReason",
     "StreamEvent",
+    "StructuredOutputError",
     "TextDelta",
     "Usage",
+    "complete_structured",
     "default_factory",
+    "strict_json_schema",
 ]
