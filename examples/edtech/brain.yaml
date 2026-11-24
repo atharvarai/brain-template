@@ -1,0 +1,29 @@
+# Domain pack for Skilvanta, a FICTIONAL ed-tech company. All data here is synthetic.
+name: Skilvanta
+description: Sells courses, mentors learners and helps them get placed.
+system_prompt: prompts/system.md
+
+# Each profile maps every tier to an ordered fallback chain.
+# Pick one with `active`, or override per process with BRAIN_MODEL_PROFILE.
+models:
+  active: claude_code
+  profiles:
+    # Free for anyone with a Claude Code subscription: uses the local `claude -p` CLI.
+    claude_code:
+      small: [{provider: claude_code, model: haiku}]
+      mid: [{provider: claude_code, model: sonnet}]
+      large: [{provider: claude_code, model: opus}]
+    # Free and offline: needs Ollama running locally.
+    ollama:
+      small: [{provider: ollama, model: "llama3.1:8b"}]
+      mid: [{provider: ollama, model: "llama3.1:8b"}]
+      large: [{provider: ollama, model: "llama3.1:8b"}]
+    # Needs ANTHROPIC_API_KEY. The second entry in a chain is the fallback.
+    anthropic:
+      small: [{provider: anthropic, model: claude-haiku-5-5}]
+      mid:
+        - {provider: anthropic, model: claude-sonnet-5-5}
+        - {provider: anthropic, model: claude-haiku-5-5}
+      large:
+        - {provider: anthropic, model: claude-opus-5-5}
+        - {provider: anthropic, model: claude-sonnet-5-5}

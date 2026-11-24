@@ -1,0 +1,53 @@
+[project]
+name = "brain-template"
+version = "0.1.0"
+description = "Industry-agnostic template for a company's AI microservice (its brain)"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "pydantic>=2.9",
+    "pydantic-settings>=2.6",
+    "pyyaml>=6.0",
+    "uvicorn>=0.32",
+]
+
+[dependency-groups]
+dev = [
+    "httpx2>=1.0",
+    "import-linter>=2.1",
+    "mypy>=1.13",
+    "pytest>=8.3",
+    "ruff>=0.8",
+    "types-pyyaml>=6.0",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "N", "RUF"]
+
+[tool.mypy]
+strict = true
+plugins = ["pydantic.mypy"]
+files = ["core"]
+
+# The core must stay company-agnostic: it may never import a domain pack.
+[tool.importlinter]
+root_packages = ["core", "examples"]
+
+[[tool.importlinter.contracts]]
+name = "core never imports from examples"
+type = "forbidden"
+source_modules = ["core"]
+forbidden_modules = ["examples"]
