@@ -1,0 +1,5 @@
+# Demo users for local development and evals. FICTIONAL people, synthetic ids.
+users:
+  ravi:   {sub: D-501, name: Ravi Naik, roles: [driver]}
+  imran:  {sub: D-502, name: Imran Qureshi, roles: [driver]}
+  neha:   {sub: O-11, name: Neha Rao, roles: [ops]}

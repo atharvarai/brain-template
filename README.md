@@ -6,7 +6,7 @@ Clone it, add one folder that describes your company (docs, tools, roles, prompt
 cases), and you get an assistant built from clearly separated AI layers: model, prompts,
 RAG, tools (MCP), agent, access control, guardrails, cache and router, observability and evals.
 
-**Status: early.** Milestones M0 to M9 are done. The service answers from a company's
+**Status: early.** Milestones M0 to M10 are done. The service answers from a company's
 documents with citations, and from the company's own systems through MCP tools. An agent
 loop takes several steps within budgets, and actions that change data wait for the user's
 approval.
@@ -30,11 +30,23 @@ design and the milestone list.
 |---|---|
 | `core/` | The generic brain. One folder per layer. Never imports from `examples/`. |
 | `examples/edtech/` | Domain pack for Skilvanta, a **fictional** ed-tech company (synthetic data). |
+| `examples/rides/` | Domain pack for Zipvaha, a **fictional** ride-hailing company's driver support (synthetic data). |
 | `tests/boundary/` | Tests that fail if company-specific words or imports leak into `core/`. |
 | `docs/` | Plan and design notes. |
 
 A company is a **domain pack**: a folder with a `brain.yaml` and its own prompts, docs,
-policies and eval cases. The process picks a pack with the `BRAIN_PACK` environment variable.
+policies, demo MCP server and eval cases. The process picks a pack with the `BRAIN_PACK`
+environment variable, and every `make` target takes `PACK=`:
+
+```bash
+PACK=examples/rides make ingest eval
+```
+
+The second pack, Zipvaha (driver support for a ride-hailing company), was built after the
+first with one rule: change nothing under `core/`. It needed one line in `core/`, a bug
+fix rather than an ed-tech assumption, and it passes 18 of its 18 evals.
+[docs/agnosticism.md](docs/agnosticism.md) records the method, the finding and the lessons
+for pack authors.
 
 ## Model-agnostic by design
 

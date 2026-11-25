@@ -16,3 +16,6 @@ jobs:
       # Retrieval quality gate: builds the example index and fails below the pack's bar.
       - run: make ingest
       - run: make eval-retrieval
+      # The second pack: same commands, different company. Proves the core stayed agnostic.
+      - run: make ingest PACK=examples/rides
+      - run: make eval-retrieval PACK=examples/rides

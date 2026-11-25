@@ -51,6 +51,7 @@ class Expectations(_Strict):
         if (
             self.calls is None
             and self.asks_approval is None
+            and self.blocked is None
             and not any(
                 (
                     self.contains_all,

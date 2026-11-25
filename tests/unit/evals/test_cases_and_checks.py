@@ -208,3 +208,9 @@ async def test_the_shipped_cases_only_name_tools_the_demo_server_offers() -> Non
     for loaded in load_cases(EDTECH_PACK / "evals" / "cases.jsonl"):
         for name in loaded.expect.calls or ():
             assert name in offered, (loaded.id, name)
+
+
+def test_any_single_expectation_makes_a_valid_case() -> None:
+    """Found by the second example pack: a case with only `blocked` was rejected."""
+    for expect in ({"blocked": True}, {"calls": []}, {"asks_approval": []}, {"excludes": ["x"]}):
+        assert EvalCase.model_validate({"id": "c", "question": "q", "expect": expect})

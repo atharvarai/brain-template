@@ -1,0 +1,65 @@
+# Domain pack for Zipvaha, a FICTIONAL ride-hailing company. All data here is synthetic.
+# Built after the Skilvanta pack with no change under core/ (see docs/agnosticism.md).
+name: Zipvaha
+description: Driver support for a ride-hailing company.
+
+rag:
+  docs: docs
+  top_k: 5
+  embedder: {kind: fastembed, model: BAAI/bge-small-en-v1.5}
+  reranker: {kind: fastembed, model: jinaai/jina-reranker-v1-tiny-en, candidates: 20}
+
+tools:
+  servers:
+    zipvaha:
+      transport: stdio
+      command: [python, mcp_server/server.py]
+      pass_env: [BRAIN_JWT_SECRET]
+  timeout_seconds: 10
+
+access:
+  jwt:
+    algorithm: HS256
+    secret_env: BRAIN_JWT_SECRET
+    issuer: zipvaha-backend
+    audience: zipvaha-brain
+  policy: policy.yaml
+  dev_users: seed/users.yaml
+
+guardrails:
+  pii: {kinds: [email, phone, card, ip_address, in_pan, in_aadhaar]}
+  injection: {detector: heuristic, action: block, scan_sources: true}
+  grounding: {check: numbers, action: flag}
+  prompt_leak: {action: block}
+
+cache:
+  exact: true
+
+router:
+  kind: fixed
+  default_tier: mid
+
+models:
+  active: claude_code
+  profiles:
+    claude_code:
+      small: [{provider: claude_code, model: haiku}]
+      mid: [{provider: claude_code, model: sonnet}]
+      large: [{provider: claude_code, model: opus}]
+    ollama:
+      small: [{provider: ollama, model: "llama3.1:8b"}]
+      mid: [{provider: ollama, model: "llama3.1:8b"}]
+      large: [{provider: ollama, model: "llama3.1:8b"}]
+  prices:
+    haiku: {input: 0.10, output: 0.50, cache_read: 0.01, cache_write: 0.125}
+    sonnet: {input: 2.00, output: 10.00, cache_read: 0.20, cache_write: 2.50}
+    opus: {input: 4.00, output: 20.00, cache_read: 0.40, cache_write: 5.00}
+    "llama3.1:8b": {input: 0, output: 0}
+
+observability:
+  capture_content: true
+
+evals:
+  cases: evals/cases.jsonl
+  min_pass_rate: 0.85
+  default_user: ravi

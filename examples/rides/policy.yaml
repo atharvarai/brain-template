@@ -1,0 +1,8 @@
+# Zipvaha (FICTIONAL). Roles to readable document labels and callable tools. Deny by default.
+roles:
+  driver:
+    read: []
+    tools: [get_my_payouts, get_my_incentive_progress, raise_dispute]
+  ops:
+    read: [internal]
+    tools: [lookup_driver]
