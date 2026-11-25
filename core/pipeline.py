@@ -8,11 +8,20 @@ insert guardrails, cache and router here, without changing the API above it.
 
 import uuid
 from collections.abc import AsyncIterator, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
-from core.access import ANONYMOUS_CALLER, Caller, OpenPolicy, Policy
+from core.access import (
+    ANONYMOUS_CALLER,
+    AuditAction,
+    AuditEntry,
+    AuditLog,
+    Caller,
+    InMemoryAuditLog,
+    OpenPolicy,
+    Policy,
+)
 from core.agent import (
     Agent,
     AgentEvent,
@@ -28,19 +37,31 @@ from core.agent import (
     ToolActivity,
     validate_decisions,
 )
-from core.config import ModelTier
-from core.llm import Completion, Message, ModelGateway, Role, TextDelta, ToolCall
+from core.config import ModelSpec, ModelTier, Provider
+from core.guardrails import GuardFlag, Guardrails
+from core.llm import (
+    Completion,
+    Message,
+    ModelGateway,
+    Role,
+    StopReason,
+    TextDelta,
+    ToolCall,
+    Usage,
+)
 from core.observability import ActiveTrace, Tracer
 from core.prompts import ComposedPrompt, Prompt, PromptRef
 from core.rag import Chunk, Retriever, Source, format_documents, to_sources
 from core.tools import ToolRegistry
 
 RESUME_OPERATION = "resume"
+NO_MODEL = ModelSpec(provider=Provider.NONE, model="none")  # for answers a guard gave
 
 
 class AnswerStatus(StrEnum):
     COMPLETE = "complete"
     AWAITING_APPROVAL = "awaiting_approval"  # see ``pending``; resume with the ``run_id``
+    BLOCKED = "blocked"  # a guardrail refused the message; no model was asked
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +80,8 @@ class Answer:
     status: AnswerStatus = AnswerStatus.COMPLETE
     run_id: str | None = None
     pending: tuple[ToolCall, ...] = ()  # actions waiting for approval, exactly as they will run
+    flags: tuple[GuardFlag, ...] = ()  # what the guardrails noticed
+    replaced: bool = False  # a guardrail replaced the model's text (streamed text is void)
 
 
 PipelineEvent = TextDelta | ToolActivity | Answer
@@ -79,6 +102,8 @@ class Pipeline:
         approval_ttl: timedelta = timedelta(hours=1),
         new_run_id: Callable[[], str] = lambda: uuid.uuid4().hex,
         policy: Policy | None = None,
+        guardrails: Guardrails | None = None,
+        audit: AuditLog | None = None,
     ) -> None:
         self._gateway = gateway
         self._system_prompt = system_prompt
@@ -92,6 +117,8 @@ class Pipeline:
         self._approval_ttl = approval_ttl
         self._new_run_id = new_run_id
         self._policy: Policy = policy or OpenPolicy()
+        self._guardrails = guardrails or Guardrails.off()
+        self._audit: AuditLog = audit or InMemoryAuditLog()
         self._prompts = (*system_prompt.refs, turn_prompt.ref)
 
     async def retrieve(self, question: str, caller: Caller = ANONYMOUS_CALLER) -> list[Chunk]:
@@ -160,8 +187,16 @@ class Pipeline:
     ) -> AsyncIterator[PipelineEvent]:
         async with self._tracer.trace(operation) as trace:
             trace.set(user=caller.user.id)
-            turn, chunks = await self._prepare(messages, trace, caller)
+            check = await self._guardrails.check_input(messages[-1].content)
+            if check.completion is not None:
+                trace.record_completion(check.completion)
+            self._note(check.flags, trace, caller)
+            if check.blocked:
+                yield self._blocked(check.message or "", check.flags, trace, messages[-1])
+                return
+            turn, chunks, source_flags = await self._prepare(messages, trace, caller)
             progress = RunProgress(messages=list(turn))
+            noticed = (*check.flags, *source_flags)
             events = self._agent.run(
                 self._gateway.for_tier(self._default_tier),
                 self._template(caller),
@@ -170,7 +205,7 @@ class Pipeline:
                 stream=stream,
                 caller=caller,
             )
-            async for event in self._relay(events, progress, chunks, trace, caller):
+            async for event in self._relay(events, progress, chunks, trace, caller, noticed):
                 yield event
 
     async def _relay(
@@ -180,19 +215,21 @@ class Pipeline:
         chunks: Sequence[Chunk],
         trace: ActiveTrace,
         caller: Caller,
+        noticed: tuple[GuardFlag, ...] = (),
     ) -> AsyncIterator[PipelineEvent]:
         """Pass text and tool events through; turn the agent's ending into an ``Answer``."""
         async for event in events:
             if isinstance(event, TextDelta | ToolActivity):
                 yield event
             elif isinstance(event, Finished):
-                yield self._finish(event.completion, progress, chunks, trace)
+                yield self._finish(event.completion, progress, chunks, trace, caller, noticed)
             elif isinstance(event, ApprovalRequired):
                 run_id = self._pause(progress, chunks, caller)
                 trace.set(run_id=run_id)
                 yield self._finish(
-                    progress.completion(), progress, chunks, trace, run_id, event.pending
-                )
+                    progress.completion(), progress, chunks, trace, caller, noticed,
+                    run_id, event.pending,
+                )  # fmt: skip
 
     def _pause(self, progress: RunProgress, chunks: Sequence[Chunk], caller: Caller) -> str:
         now = datetime.now(UTC)
@@ -206,7 +243,7 @@ class Pipeline:
 
     async def _prepare(
         self, messages: Sequence[Message], trace: ActiveTrace, caller: Caller
-    ) -> tuple[list[Message], list[Chunk]]:
+    ) -> tuple[list[Message], list[Chunk], tuple[GuardFlag, ...]]:
         """Retrieve for the latest question and rewrite that turn to carry the documents.
 
         Documents go into the user turn, not the system prompt: the system prompt stays
@@ -216,10 +253,13 @@ class Pipeline:
         trace.record_prompts(str(ref) for ref in self._prompts)
         trace.capture(input=last.content)
         with trace.span("retrieve", k=self._top_k) as span:
-            chunks = await self.retrieve(last.content, caller)
+            chunks, flags = self._guardrails.filter_sources(
+                await self.retrieve(last.content, caller)
+            )
             span["hits"] = len(chunks)
+        self._note(flags, trace, caller)
         turn = self._turn_prompt.render(documents=format_documents(chunks), question=last.content)
-        return [*history, Message(Role.USER, turn)], chunks
+        return [*history, Message(Role.USER, turn)], chunks, flags
 
     def _finish(
         self,
@@ -227,9 +267,18 @@ class Pipeline:
         progress: RunProgress,
         chunks: Sequence[Chunk],
         trace: ActiveTrace,
+        caller: Caller,
+        noticed: tuple[GuardFlag, ...] = (),
         run_id: str | None = None,
         pending: tuple[ToolCall, ...] = (),
     ) -> Answer:
+        # Everything the answer could be grounded in: the turns (documents, question,
+        # earlier answers) and every tool result.
+        evidence = [m.content for m in progress.messages]
+        evidence += [r.content for m in progress.messages for r in m.tool_results]
+        output = self._guardrails.check_output(completion.text, evidence)
+        self._note(output.flags, trace, caller)
+        completion = replace(completion, text=output.text)
         sources = to_sources(chunks, completion.text)
         trace.record_retrieval(
             (chunk.id for chunk in chunks),
@@ -246,7 +295,31 @@ class Pipeline:
             AnswerStatus.AWAITING_APPROVAL if run_id else AnswerStatus.COMPLETE,
             run_id,
             pending,
+            (*noticed, *output.flags),
+            output.replaced,
         )
+
+    def _blocked(
+        self, message: str, flags: tuple[GuardFlag, ...], trace: ActiveTrace, last: Message
+    ) -> Answer:
+        trace.capture(input=last.content, output=message)
+        completion = Completion(message, NO_MODEL, Usage(), StopReason.END, 0)
+        return Answer(
+            completion, (), self._prompts, trace.trace_id,
+            status=AnswerStatus.BLOCKED, flags=flags,
+        )  # fmt: skip
+
+    def _note(self, flags: Sequence[GuardFlag], trace: ActiveTrace, caller: Caller) -> None:
+        """Every guard finding goes on the trace; blocks also go to the audit log."""
+        for flag in flags:
+            trace.event("guard", guard=flag.guard, blocked=flag.blocked, detail=flag.detail[:200])
+            if flag.blocked:
+                self._audit.record(
+                    AuditEntry.of(
+                        AuditAction.GUARD_BLOCKED, caller.user, flag.guard, "blocked",
+                        trace_id=trace.trace_id, detail={"reason": flag.detail[:200]},
+                    )
+                )  # fmt: skip
 
 
 async def _last(events: AsyncIterator[PipelineEvent]) -> Answer:

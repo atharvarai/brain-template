@@ -41,6 +41,16 @@ access:
   policy: policy.yaml
   dev_users: seed/users.yaml  # demo users for `core.cli token` and the evals
 
+# Checks around every model call. Personal data is redacted from traces, logs and the audit
+# log; messages that try to override the assistant are refused without a model call;
+# documents and tool results that give orders are dropped or marked; answers that copy the
+# system prompt are replaced; figures that appear in no source are flagged on the trace.
+guardrails:
+  pii: {kinds: [email, phone, card, ip_address, in_pan, in_aadhaar]}
+  injection: {detector: heuristic, action: block, scan_sources: true}
+  grounding: {check: numbers, action: flag}
+  prompt_leak: {action: block}
+
 # Each profile maps every tier to an ordered fallback chain.
 # Pick one with `active`, or override per process with BRAIN_MODEL_PROFILE.
 models:

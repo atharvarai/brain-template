@@ -15,6 +15,7 @@ from core.api.context import AppContext, get_caller, get_context
 from core.api.schemas import (
     CallMetadata,
     ChatMessage,
+    GuardFlagOut,
     PendingActionOut,
     SourceOut,
     ToolActivityOut,
@@ -47,6 +48,10 @@ class ChatMetadata(CallMetadata):
     # POST /v1/runs/{run_id}/decisions to carry on.
     run_id: str | None
     pending: list[PendingActionOut]
+    guard_flags: list[GuardFlagOut]
+    # True when a guardrail replaced the model's answer. A streaming client must then show
+    # the text of the `replace` event instead of what it streamed.
+    replaced: bool
 
     @classmethod
     def from_answer(cls, answer: Answer) -> Self:
@@ -57,6 +62,11 @@ class ChatMetadata(CallMetadata):
             status=answer.status,
             run_id=answer.run_id,
             pending=[PendingActionOut.from_call(call) for call in answer.pending],
+            guard_flags=[
+                GuardFlagOut(guard=f.guard, detail=f.detail, blocked=f.blocked)
+                for f in answer.flags
+            ],
+            replaced=answer.replaced,
             **base.model_dump(),
         )
 
@@ -70,9 +80,9 @@ def _sse(event: str, data: dict[str, Any]) -> str:
 
 
 async def event_stream(events: AsyncIterator[PipelineEvent]) -> AsyncIterator[str]:
-    """delta events carry text, tool events report each tool run, an approval event lists
-    actions waiting for a decision, one done event carries metadata, and an error event
-    ends the stream."""
+    """delta events carry text, tool events report each tool run, a replace event carries
+    text a guardrail put in place of the answer, an approval event lists actions waiting
+    for a decision, one done event carries metadata, and an error event ends the stream."""
     try:
         async for event in events:
             if isinstance(event, TextDelta):
@@ -81,6 +91,9 @@ async def event_stream(events: AsyncIterator[PipelineEvent]) -> AsyncIterator[st
                 yield _sse("tool", ToolActivityOut.from_activity(event).model_dump())
             else:
                 metadata = ChatMetadata.from_answer(event)
+                if event.replaced or event.status is AnswerStatus.BLOCKED:
+                    # Whatever streamed before is void: show this text instead.
+                    yield _sse("replace", {"text": event.completion.text})
                 if metadata.status is AnswerStatus.AWAITING_APPROVAL:
                     yield _sse("approval", metadata.model_dump(include={"run_id", "pending"}))
                 yield _sse("done", metadata.model_dump(mode="json"))

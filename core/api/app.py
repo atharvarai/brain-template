@@ -9,11 +9,12 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from core import __version__
-from core.access import AccessConfigError, SqliteAuditLog, build_access
+from core.access import AccessConfigError, RedactingAuditLog, SqliteAuditLog, build_access
 from core.agent import Agent, Budget, SqliteRunStore
 from core.api import chat, feedback, health, runs, title
 from core.api.context import AppContext
 from core.config import ModelTier, PackError, Settings, load_pack
+from core.guardrails import build_guardrails
 from core.llm import (
     ModelGateway,
     ProviderFactory,
@@ -59,12 +60,15 @@ def build_context(settings: Settings, provider_factory: ProviderFactory) -> AppC
 
     # The pack's prompts win over the built-in skeletons, so a company can override any of them.
     prompts = pack_prompt_store(pack.prompts_dir, pack.config.prompts.pinned)
+    system_prompt = build_system_prompt(prompts, pack.config)
+    guardrails = build_guardrails(pack.config, system_prompt.text, gateway, prompts)
     store = SqliteTraceStore(pack.state_dir(settings.data_dir) / TRACES_FILE)
     tracer = Tracer(
         FanOutSink([store, LoggingTraceSink()]),
         PriceBook(models.prices),
         capture_content=pack.config.observability.capture_content,
         attributes={"pack": pack.config.name, "profile": profile},
+        redact=guardrails.redact,  # personal data never reaches the trace store
     )
     rag = build_rag(pack, settings.data_dir)
     retriever: Retriever = NullRetriever()
@@ -80,7 +84,9 @@ def build_context(settings: Settings, provider_factory: ProviderFactory) -> AppC
         raise PackError(str(exc)) from exc
     if not access.authenticator.required:
         logger.warning("access control is off: every request is anonymous (no 'access' section)")
-    audit = SqliteAuditLog(pack.state_dir(settings.data_dir) / AUDIT_FILE)
+    audit = RedactingAuditLog(
+        SqliteAuditLog(pack.state_dir(settings.data_dir) / AUDIT_FILE), guardrails.redact
+    )
 
     return AppContext(
         pack=pack,
@@ -92,7 +98,7 @@ def build_context(settings: Settings, provider_factory: ProviderFactory) -> AppC
         feedback=store,
         pipeline=Pipeline(
             gateway,
-            build_system_prompt(prompts, pack.config),
+            system_prompt,
             retriever,
             turn_prompt=prompts.get(RAG_TURN_PROMPT),
             tracer=tracer,
@@ -103,10 +109,13 @@ def build_context(settings: Settings, provider_factory: ProviderFactory) -> AppC
                 auto_approve=agent.auto_approve,
                 policy=access.policy,
                 audit=audit,
+                guardrails=guardrails,
             ),
             runs=SqliteRunStore(pack.state_dir(settings.data_dir) / RUNS_FILE),
             approval_ttl=timedelta(minutes=agent.approval_ttl_minutes),
             policy=access.policy,
+            guardrails=guardrails,
+            audit=audit,
         ),
         title_generator=TitleGenerator(
             gateway.for_tier(ModelTier.SMALL), prompts.get(TITLE_PROMPT), tracer

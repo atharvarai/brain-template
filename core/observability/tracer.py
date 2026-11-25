@@ -75,8 +75,10 @@ class ActiveTrace:
         clock: Callable[[], float],
         started_at: datetime,
         attributes: Attributes,
+        redact: Callable[[str], str] = lambda text: text,
     ) -> None:
         self.trace_id = trace_id
+        self._redact = redact
         self._operation = operation
         self._prices = prices
         self._capture = capture_content
@@ -137,9 +139,9 @@ class ActiveTrace:
         if not self._capture:
             return
         if input is not None:
-            self._input = input
+            self._input = self._redact(input)
         if output is not None:
-            self._output = output
+            self._output = self._redact(output)
 
     def finish(self, status: TraceStatus, error: str | None = None) -> Trace:
         called = self._model is not None
@@ -149,7 +151,7 @@ class ActiveTrace:
             started_at=self._started_at,
             duration_ms=self._elapsed_ms(),
             status=status,
-            error=error,
+            error=self._redact(error) if error else error,
             provider=self._provider,
             model=self._model,
             input_tokens=self._input_tokens,
@@ -196,8 +198,11 @@ class Tracer:
         clock: Callable[[], float] = time.perf_counter,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
         new_id: Callable[[], str] = lambda: uuid.uuid4().hex,
+        redact: Callable[[str], str] = lambda text: text,
     ) -> None:
+        """``redact`` cleans personal data out of any text the trace stores."""
         self._sink = sink
+        self._redact = redact
         self._prices = prices or PriceBook({})
         self._capture = capture_content
         self._attributes = dict(attributes or {})
@@ -215,6 +220,7 @@ class Tracer:
             self._clock,
             self._now(),
             self._attributes,
+            self._redact,
         )
         token = _active.set(active)
         status, error = TraceStatus.OK, None

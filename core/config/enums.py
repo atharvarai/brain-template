@@ -11,6 +11,7 @@ class Provider(StrEnum):
     OLLAMA = "ollama"
     CLAUDE_CODE = "claude_code"  # local `claude -p` CLI on a subscription, no API key
     FAKE = "fake"  # deterministic, for tests
+    NONE = "none"  # no model was called (a guardrail answered); never configured in a profile
 
 
 class EmbedderKind(StrEnum):
@@ -54,3 +55,30 @@ class JwtAlgorithm(StrEnum):
 
     HS256 = "HS256"  # shared secret: simple, fine when one backend issues and checks tokens
     RS256 = "RS256"  # key pair: the brain holds only the public key
+
+
+class PiiKind(StrEnum):
+    """Personal data the redactor finds. Regional kinds are opt-in per pack."""
+
+    EMAIL = "email"
+    PHONE = "phone"
+    CARD = "card"  # payment card numbers that pass the Luhn check
+    IP_ADDRESS = "ip_address"
+    IN_PAN = "in_pan"  # Indian Permanent Account Number
+    IN_AADHAAR = "in_aadhaar"  # Indian Aadhaar number (Verhoeff check digit)
+
+
+class InjectionDetector(StrEnum):
+    HEURISTIC = "heuristic"  # phrase patterns: free and instant, English only
+    MODEL = "model"  # a small-tier model classifies the message: slower, any language
+    OFF = "off"
+
+
+class GuardAction(StrEnum):
+    FLAG = "flag"  # record it on the trace and the answer, change nothing
+    BLOCK = "block"  # refuse (input) or replace the answer (output)
+
+
+class GroundingCheck(StrEnum):
+    NUMBERS = "numbers"  # every figure in the answer must appear in what it was given
+    OFF = "off"

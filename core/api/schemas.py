@@ -105,3 +105,11 @@ class PendingActionOut(BaseModel):
     @classmethod
     def from_call(cls, call: ToolCall) -> Self:
         return cls(call_id=call.id, tool=call.name, arguments=dict(call.arguments))
+
+
+class GuardFlagOut(BaseModel):
+    """Something a guardrail noticed. ``blocked`` means it changed the outcome."""
+
+    guard: str
+    detail: str
+    blocked: bool

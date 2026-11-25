@@ -1,16 +1,18 @@
 """A pipeline wired to a scripted model and in-memory tools, for agent tests."""
 
-from collections.abc import Collection, Sequence
+from collections.abc import Callable, Collection, Sequence
 from pathlib import Path
 
 from core.access import AuditLog, Policy
 from core.agent import Agent, Budget, InMemoryRunStore
 from core.config import ModelSpec, ModelTier, Provider, load_pack
+from core.guardrails import Guardrails
 from core.llm import Message, ModelGateway, Role, ToolCall, ToolResult, ToolSpec
 from core.llm.adapters.fake import FakeProvider, Reply
 from core.observability import InMemoryTraceStore, Tracer
 from core.pipeline import Pipeline
 from core.prompts import ChainedPromptStore, FilePromptStore, build_system_prompt, builtin_store
+from core.rag import Retriever
 
 EMPTY = {"type": "object", "properties": {}}
 FIND = ToolSpec("find_order", "Find an order.", EMPTY)
@@ -21,9 +23,10 @@ CANCEL = ToolSpec("cancel_order", "Cancel an order.", EMPTY)
 class FakeTools:
     """``find_order`` and ``check_stock`` are read-only; ``cancel_order`` changes data."""
 
-    def __init__(self, failing: Collection[str] = ()) -> None:
+    def __init__(self, failing: Collection[str] = (), output: str | None = None) -> None:
         self.specs = (FIND, STOCK, CANCEL)
         self._failing = set(failing)
+        self._output = output
         self.ran: list[ToolCall] = []
         self.credentials: list[str | None] = []
 
@@ -35,7 +38,7 @@ class FakeTools:
         self.credentials.append(credentials)
         if call.name in self._failing:
             return ToolResult(call.id, call.name, "service down", is_error=True)
-        return ToolResult(call.id, call.name, f"{call.name} result")
+        return ToolResult(call.id, call.name, self._output or f"{call.name} result")
 
 
 def calls(*names: str, prefix: str = "c") -> tuple[ToolCall, ...]:
@@ -50,6 +53,9 @@ def build(
     auto_approve: Collection[str] = (),
     policy: Policy | None = None,
     audit: AuditLog | None = None,
+    guardrails: Guardrails | None = None,
+    retriever: Retriever | None = None,
+    tracer_redact: Callable[[str], str] | None = None,
 ) -> tuple[Pipeline, FakeProvider, FakeTools, InMemoryTraceStore]:
     pack = load_pack(pack_dir)
     prompts = ChainedPromptStore([FilePromptStore(pack.prompts_dir), builtin_store()])
@@ -59,12 +65,14 @@ def build(
     pipeline = Pipeline(
         ModelGateway({tier: provider for tier in ModelTier}),
         build_system_prompt(prompts, pack.config),
-        _NoDocs(),
+        retriever or _NoDocs(),
         prompts.get("rag_turn"),
-        Tracer(store),
-        agent=Agent(tools, budget, auto_approve, policy, audit),
+        Tracer(store, capture_content=True, redact=tracer_redact or (lambda text: text)),
+        agent=Agent(tools, budget, auto_approve, policy, audit, guardrails),
         runs=InMemoryRunStore(),
         policy=policy,
+        guardrails=guardrails,
+        audit=audit,
     )
     return pipeline, provider, tools, store
 

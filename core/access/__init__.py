@@ -6,6 +6,7 @@ from core.access.audit import (
     AuditEntry,
     AuditLog,
     InMemoryAuditLog,
+    RedactingAuditLog,
     SqliteAuditLog,
 )
 from core.access.auth import Authenticator, JwtAuthenticator, OpenAccess
@@ -32,6 +33,7 @@ __all__ = [
     "OpenAccess",
     "OpenPolicy",
     "Policy",
+    "RedactingAuditLog",
     "RolePolicy",
     "SqliteAuditLog",
     "User",

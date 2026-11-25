@@ -8,8 +8,8 @@ decision and every rejected token.
 import json
 import sqlite3
 import threading
-from collections.abc import Mapping
-from dataclasses import dataclass, field
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
@@ -23,6 +23,7 @@ class AuditAction(StrEnum):
     TOOL_DENIED = "tool_denied"  # the policy blocked a call
     APPROVAL = "approval"  # a person approved or declined an action
     AUTH_FAILED = "auth_failed"  # a request's token was rejected
+    GUARD_BLOCKED = "guard_blocked"  # a guardrail refused a message or replaced an answer
 
 
 @dataclass(frozen=True, slots=True)
@@ -112,3 +113,27 @@ class SqliteAuditLog:
             )
             for at, action, user_id, roles, target, outcome, trace_id, detail in rows
         ]  # fmt: skip
+
+
+class RedactingAuditLog:
+    """Decorator: cleans personal data out of entry details before the inner log stores
+    them. Tool arguments often carry it (an email to send to, a phone number to call)."""
+
+    def __init__(self, inner: AuditLog, redact: Callable[[str], str]) -> None:
+        self._inner = inner
+        self._redact = redact
+
+    def record(self, entry: AuditEntry) -> None:
+        self._inner.record(replace(entry, detail=self._clean(dict(entry.detail))))
+
+    def recent(self, limit: int) -> list[AuditEntry]:
+        return self._inner.recent(limit)
+
+    def _clean(self, value: Any) -> Any:
+        if isinstance(value, str):
+            return self._redact(value)
+        if isinstance(value, dict):
+            return {key: self._clean(item) for key, item in value.items()}
+        if isinstance(value, list | tuple):
+            return [self._clean(item) for item in value]
+        return value

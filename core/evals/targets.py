@@ -8,9 +8,10 @@ from typing import Protocol
 
 from core.access import ANONYMOUS_CALLER, Caller
 from core.agent import Decision
+from core.config import Provider
 from core.evals.cases import EvalCase
 from core.observability import PriceBook
-from core.pipeline import Pipeline
+from core.pipeline import AnswerStatus, Pipeline
 
 EVAL_OPERATION = "eval"
 MAX_RESUMES = 5  # a run that keeps pausing is cut off here
@@ -35,6 +36,8 @@ class EvalOutcome:
     cost_usd: float | None = None
     tools_called: tuple[str, ...] = ()  # in the order they ran
     approvals_requested: tuple[str, ...] = ()  # tools the brain paused on
+    blocked: bool = False  # a guardrail refused the message
+    guard_flags: tuple[str, ...] = ()  # "guard: detail" for everything the guardrails noticed
 
 
 class EvalTarget(Protocol):
@@ -82,9 +85,15 @@ class AnswerTarget:
             trace_id=answer.trace_id,
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,
-            cost_usd=self._prices.cost(spec.model, usage.input_tokens, usage.output_tokens),
+            cost_usd=(
+                0.0  # a guardrail answered: no model was called
+                if spec.provider is Provider.NONE
+                else self._prices.cost(spec.model, usage.input_tokens, usage.output_tokens)
+            ),
             tools_called=tuple(activity.name for activity in answer.tools),
             approvals_requested=tuple(asked),
+            blocked=answer.status is AnswerStatus.BLOCKED,
+            guard_flags=tuple(f"{f.guard}: {f.detail}" for f in answer.flags),
         )
 
 

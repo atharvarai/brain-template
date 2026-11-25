@@ -9,8 +9,12 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from core.config.enums import (
     EmbedderKind,
+    GroundingCheck,
+    GuardAction,
+    InjectionDetector,
     JwtAlgorithm,
     ModelTier,
+    PiiKind,
     Provider,
     RerankerKind,
     StopwordList,
@@ -64,6 +68,8 @@ class ModelsConfig(_Strict):
             missing = [tier.value for tier in ModelTier if not profile.get(tier)]
             if missing:
                 raise ValueError(f"profile '{name}' has no model for tier(s): {missing}")
+            if any(spec.provider is Provider.NONE for chain in profile.values() for spec in chain):
+                raise ValueError(f"profile '{name}': provider 'none' is not a real provider")
         return self
 
     def chain(self, tier: ModelTier, profile: str | None = None) -> tuple[ModelSpec, ...]:
@@ -187,6 +193,50 @@ class AccessConfig(_Strict):
     dev_users: str | None = None
 
 
+class PiiConfig(_Strict):
+    """Personal data found in text is replaced by a placeholder like ``[EMAIL]`` before it
+    is stored in traces, logs or the audit log. The model still sees what the user wrote."""
+
+    kinds: tuple[PiiKind, ...] = (PiiKind.EMAIL, PiiKind.PHONE, PiiKind.CARD, PiiKind.IP_ADDRESS)
+
+
+class InjectionConfig(_Strict):
+    """Prompt-injection checks: on the user's message, and on retrieved documents and tool
+    results (text the brain did not write but the model will read)."""
+
+    detector: InjectionDetector = InjectionDetector.HEURISTIC
+    action: GuardAction = GuardAction.BLOCK  # for the user's message
+    scan_sources: bool = True  # suspicious documents are dropped, tool results marked
+    blocked_message: str = (
+        "I can't help with that request. I can answer questions about our services, "
+        "policies and your account."
+    )
+
+
+class GroundingConfig(_Strict):
+    """Checks that the answer sticks to what it was given."""
+
+    check: GroundingCheck = GroundingCheck.NUMBERS
+    action: GuardAction = GuardAction.FLAG
+
+
+class PromptLeakConfig(_Strict):
+    """Stops answers that repeat the system prompt's own wording."""
+
+    action: GuardAction = GuardAction.BLOCK
+    min_words: int = Field(default=8, ge=4)  # a run of this many words copied = a leak
+    blocked_message: str = (
+        "I can't share my instructions, but I'm happy to help with your question."
+    )
+
+
+class GuardrailsConfig(_Strict):
+    pii: PiiConfig = Field(default_factory=PiiConfig)
+    injection: InjectionConfig = Field(default_factory=InjectionConfig)
+    grounding: GroundingConfig = Field(default_factory=GroundingConfig)
+    prompt_leak: PromptLeakConfig = Field(default_factory=PromptLeakConfig)
+
+
 class ObservabilityConfig(_Strict):
     """What each request's trace keeps. Traces always hold timings, tokens, cost, model,
     prompt versions and document ids; the user's text and the answer only if allowed here."""
@@ -216,5 +266,6 @@ class BrainConfig(_Strict):
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
     access: AccessConfig | None = None
+    guardrails: GuardrailsConfig = Field(default_factory=GuardrailsConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
     evals: EvalsConfig = Field(default_factory=EvalsConfig)

@@ -17,6 +17,8 @@ def test_default_factory_builds_an_adapter_for_every_provider(monkeypatch) -> No
     factory = default_factory()
 
     for provider in Provider:
+        if provider is Provider.NONE:  # a marker for "no model was called", never built
+            continue
         adapter = factory.create(spec(provider, "some-model"))
         assert adapter.name == f"{provider.value}:some-model"
 
@@ -61,3 +63,14 @@ def test_request_validation() -> None:
         LLMRequest(system="s", messages=())
     with pytest.raises(ValueError, match="last message must come from the user"):
         LLMRequest(system="s", messages=(Message(Role.ASSISTANT, "hi"),))
+
+
+def test_the_none_marker_cannot_be_configured_as_a_model() -> None:
+    import pytest
+    from pydantic import ValidationError
+
+    from core.config import ModelsConfig
+
+    tiers = {t: [{"provider": "none", "model": "x"}] for t in ("small", "mid", "large")}
+    with pytest.raises(ValidationError, match="none"):
+        ModelsConfig.model_validate({"active": "p", "profiles": {"p": tiers}})

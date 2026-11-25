@@ -34,6 +34,8 @@ def report_to_dict(report: EvalReport) -> dict[str, Any]:
                 "retrieved": list(r.outcome.retrieved) if r.outcome else [],
                 "tools_called": list(r.outcome.tools_called) if r.outcome else [],
                 "approvals_requested": list(r.outcome.approvals_requested) if r.outcome else [],
+                "blocked": r.outcome.blocked if r.outcome else False,
+                "guard_flags": list(r.outcome.guard_flags) if r.outcome else [],
             }
             for r in report.results
         ],

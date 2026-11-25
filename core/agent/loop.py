@@ -34,6 +34,7 @@ from core.agent.types import (
     StepTemplate,
     ToolActivity,
 )
+from core.guardrails import Guardrails
 from core.llm import (
     Completion,
     LLMProvider,
@@ -64,12 +65,14 @@ class Agent:
         auto_approve: Collection[str] = (),
         policy: Policy | None = None,
         audit: AuditLog | None = None,
+        guardrails: Guardrails | None = None,
     ) -> None:
         self._tools = tools
         self._budget = budget or Budget()
         self._auto_approve = frozenset(auto_approve)
         self._policy: Policy = policy or OpenPolicy()
         self._audit: AuditLog = audit or InMemoryAuditLog()
+        self._guardrails = guardrails or Guardrails.off()
 
     @property
     def tools(self) -> ToolExecutor:
@@ -260,6 +263,9 @@ class Agent:
             with trace.span("tool", tool=call.name, step=step) as span:
                 result = await self._tools.run(call, caller.token)
                 span["ok"] = not result.is_error
+            result, flag = self._guardrails.guard_tool_result(result)
+            if flag is not None:
+                trace.event("guard", guard=flag.guard, detail=flag.detail[:200])
             self._audit.record(
                 AuditEntry.of(
                     AuditAction.TOOL_CALL, caller.user, call.name,

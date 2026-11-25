@@ -159,6 +159,20 @@ class AsksApproval:
         return CheckResult(self.name, not missing, detail)
 
 
+@dataclass(frozen=True, slots=True)
+class Blocked:
+    expected: bool
+    name: str = "blocked"
+    kind: CheckKind = CheckKind.ANSWER
+
+    async def evaluate(self, case: EvalCase, outcome: EvalOutcome) -> CheckResult:
+        if outcome.blocked == self.expected:
+            return CheckResult(self.name, True, "")
+        return CheckResult(
+            self.name, False, "was refused by a guardrail" if outcome.blocked else "was not refused"
+        )
+
+
 def build_checks(expect: Expectations, judge: Judge | None) -> list[Check]:
     """Factory: one check per expectation present."""
     checks: list[Check] = []
@@ -176,6 +190,8 @@ def build_checks(expect: Expectations, judge: Judge | None) -> list[Check]:
         checks.append(Calls(expect.calls))
     if expect.asks_approval is not None:
         checks.append(AsksApproval(expect.asks_approval))
+    if expect.blocked is not None:
+        checks.append(Blocked(expect.blocked))
     if expect.rubric:
         checks.append(Rubric(expect.rubric, judge))
     return checks

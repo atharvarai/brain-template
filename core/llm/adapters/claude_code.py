@@ -39,6 +39,7 @@ from core.llm.types import (
     ToolSpec,
     Usage,
 )
+from core.prompts.template import wrap_untrusted
 
 _STOP_REASONS = {
     "end_turn": StopReason.END,
@@ -134,9 +135,11 @@ after the block. When you need no function, just reply to the user as usual, wit
 
 def _render_turn(message: Message) -> str:
     """One turn as plain text, including any tool calls or tool results it carries."""
+    # wrap_untrusted: a result can never close its own tag and pose as the conversation.
     parts = [
-        f'<tool_result name="{r.name}" status="{"error" if r.is_error else "ok"}">\n'
-        f"{r.content}\n</tool_result>"
+        wrap_untrusted(
+            "tool_result", r.content, name=r.name, status="error" if r.is_error else "ok"
+        )
         for r in message.tool_results
     ]
     if message.content:

@@ -44,6 +44,7 @@ class Expectations(_Strict):
     calls: tuple[str, ...] | None = None
     # Tools that must have paused for approval. An empty list means nothing may pause.
     asks_approval: tuple[str, ...] | None = None
+    blocked: bool | None = None  # whether a guardrail must (true) or must not (false) refuse
 
     @model_validator(mode="after")
     def _not_empty(self) -> Self:

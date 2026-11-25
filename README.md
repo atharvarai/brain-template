@@ -6,14 +6,21 @@ Clone it, add one folder that describes your company (docs, tools, roles, prompt
 cases), and you get an assistant built from clearly separated AI layers: model, prompts,
 RAG, tools (MCP), agent, access control, guardrails, cache and router, observability and evals.
 
-**Status: early.** Milestones M0 to M7 are done: the service answers questions from a
-company's documents with citations and from the company's own systems through MCP tools.
-An agent loop takes several steps within budgets, and actions that change data wait for the
-user's approval. Every request carries the user's token: their roles decide which documents
-they can read and which tools they can call, and tools run as them. Underneath are a
-vendor-neutral model layer with failover, versioned prompts and schema-validated structured
-output. Every request is traced, actions are audited, and each pack carries an eval set that
-gates changes. See [docs/PLAN.md](docs/PLAN.md) for the design and the milestone list.
+**Status: early.** Milestones M0 to M8 are done. The service answers from a company's
+documents with citations, and from the company's own systems through MCP tools. An agent
+loop takes several steps within budgets, and actions that change data wait for the user's
+approval.
+
+Every request carries the user's token. Their roles decide which documents they can read
+and which tools they can call, and tools run as them. Guardrails sit around every model
+call: they refuse injection attempts, drop or mark poisoned sources, replace answers that
+leak the system prompt, flag figures no source supports, and keep personal data out of
+everything stored.
+
+Underneath are a vendor-neutral model layer with failover, versioned prompts, and
+schema-validated structured output. Every request is traced, actions are audited, and each
+pack carries an eval set that gates changes. See [docs/PLAN.md](docs/PLAN.md) for the
+design and the milestone list.
 
 ## How it is organised
 
@@ -271,6 +278,46 @@ make tools tool=get_course_progress args='{"course": "DSA"}' as=riya
 make audit
 ```
 
+## Guardrails
+
+Checks run around every model call. Each is a small class behind one `Guardrails` object,
+configured per pack:
+
+```yaml
+guardrails:
+  pii: {kinds: [email, phone, card, ip_address, in_pan, in_aadhaar]}
+  injection: {detector: heuristic, action: block, scan_sources: true}
+  grounding: {check: numbers, action: flag}
+  prompt_leak: {action: block}
+```
+
+| Check | Where | What happens |
+|---|---|---|
+| Prompt injection | the user's message | Refused with a fixed reply and no model call, or flagged. `heuristic` matches known phrasings for free; `model` asks the small tier and catches other languages |
+| Injected sources | retrieved documents, tool results | A document that gives orders is dropped. A tool result is kept but marked as data |
+| Prompt leak | the answer | An answer that copies a run of the system prompt's rules is replaced |
+| Grounding | the answer | Figures that appear in no document, tool result or question are flagged |
+| PII | traces, logs, audit log | Emails, phone numbers, cards (Luhn), IP addresses, PAN, Aadhaar (Verhoeff) become `[EMAIL]` and so on |
+
+Every finding lands on the trace and on the answer (`guard_flags`); blocks also go to the
+audit log. A streamed answer is checked when it ends. If a guard replaces it, a `replace`
+event carries the text the client must show instead. A refused message comes back with
+`status: "blocked"` and provider `none`.
+
+What the Skilvanta evals showed:
+
+- **Patterns plus the model's own rules.** A Hinglish injection gets past the English
+  patterns, but the model refuses it anyway. Adding the `model` detector is a config change.
+- **The grounding check flags derived figures.** It fired on 4 of 49 answers in one run.
+  Two were correct arithmetic: a fee after a 30% scholarship, and attendance as a
+  percentage. Two were a parsing bug, now fixed. That is why it flags rather than blocks.
+- **Redaction errs towards caution.** The company's own support address is redacted in
+  stored traces too.
+
+The Skilvanta pack carries two planted injections on purpose: a learner tip page with an
+injected "SYSTEM:" line, and a mentor note in the demo backend data that offers a fake
+refund code. The evals check that neither has any effect.
+
 ## Observability
 
 Every request (chat, title, eval, judge) writes one trace:
@@ -323,21 +370,25 @@ Each case runs as a demo user with a real signed token (`evals.default_user`, or
 `"user"`), so retrieval filters, tool policy and the tool server's own checks are all
 exercised. Retrieval-only evals respect the user's labels too.
 
-Skilvanta's 46 cases cover:
+Skilvanta's 51 cases cover:
 
 - facts and policies, including multi-step reasoning
-- leaks of restricted documents, and prompt injection
+- leaks of restricted documents
 - follow-up questions, and a Hinglish question
 - tool use: questions that need a tool, a tool error, and a question that must not use tools
 - agent runs: multi-step lookups, a booking approved and one declined, a refund request
 - access by role: what a learner, mentor, support agent and admin can each read and do, and
   a mentor refused another mentor's learner by the tool server
+- prompt injection:
+  - direct, role-play and Hinglish attempts
+  - a question that merely uses the word "instructions"
+  - injections planted in a document and in tool data
 
-The latest run through the `claude_code` profile passed 45 of 46 in about 90 s. The same
-traffic would cost about $0.44 at API list prices.
+A `blocked` expectation checks whether a guardrail refused the message.
 
-The one failing case is the Hinglish one: the English-only reranker drops the section that
-holds the answer.
+The latest run through the `claude_code` profile passed 50 of 51 in about 100 s. The same
+traffic would cost about $0.47 at API list prices. The one failing case is the Hinglish one:
+the English-only reranker drops the section that holds the answer.
 
 ## Quick start
 
