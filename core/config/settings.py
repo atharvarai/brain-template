@@ -17,5 +17,5 @@ class Settings(BaseSettings):
     data_dir: Path = Path(".brain")  # BRAIN_DATA_DIR: where the brain keeps its own data
     # BRAIN_ROUTER: overrides brain.yaml's router kind, to compare routers on the same evals
     router: RouterKind | None = None
-    # BRAIN_WEB_DIR: a static chat page for demos, served at /demo when the folder exists
-    web_dir: Path | None = Path("web")
+    # BRAIN_DEMO_PAGE: serve the built-in demo chat page at /demo (turn off in production)
+    demo_page: bool = True

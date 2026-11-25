@@ -38,8 +38,16 @@ dev = [
     "types-pyyaml>=6.0",
 ]
 
-[tool.uv]
-package = false
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+# The installable part is the core: a company's brain repo depends on it and adds its pack.
+[tool.hatch.build.targets.wheel]
+packages = ["core"]
+
+[tool.hatch.build.targets.sdist]
+include = ["core", "README.md", "LICENSE"]
 
 [tool.pytest.ini_options]
 pythonpath = ["."]

@@ -81,7 +81,7 @@ open http://127.0.0.1:8000/demo/
 make -s token as=riya         # paste this token into the demo page
 ```
 
-The demo page streams answers with their sources, shows each tool the brain ran, and puts
+The demo page (built in, at `/demo`; turn it off with `BRAIN_DEMO_PAGE=false`) streams answers with their sources, shows each tool the brain ran, and puts
 actions that change data in front of you to approve or decline. Some questions to try as
 the learner Riya:
 
@@ -113,7 +113,20 @@ curl -N http://127.0.0.1:8000/v1/chat -H "Authorization: Bearer $TOKEN" \
 ## Make your own brain
 
 Copy a pack, describe your company, connect your backend's MCP server and write eval
-cases. Nothing under `core/` changes.
+cases. Nothing under `core/` changes. There are two ways to start:
+
+- **Use this repository as a template** (the "Use this template" button on GitHub). You
+  get the core, both example packs and the tooling in a repository of your own. Good for
+  learning the code or changing it.
+- **Depend on the core as a package**, and keep only your pack in your repository.
+  [skilvanta-brain](https://github.com/atharvarai/skilvanta-brain) is Skilvanta set up
+  this way: its whole repository is the pack, a `pyproject.toml` that pins
+  `brain-template`, and a Makefile.
+
+  ```toml
+  dependencies = ["brain-template @ git+https://github.com/atharvarai/brain-template@v0.1.0"]
+  ```
+
 [docs/make-your-own-brain.md](docs/make-your-own-brain.md) walks through it step by step,
 and [docs/agnosticism.md](docs/agnosticism.md) shows how the second pack was built to
 prove it.
@@ -123,7 +136,6 @@ prove it.
 | `core/` | The generic brain. Never imports from `examples/`, and contains no domain words. Both rules are enforced by tests |
 | `examples/edtech/` | Skilvanta: 19 documents, 4 roles, 6 tools, 51 eval cases |
 | `examples/rides/` | Zipvaha: 8 documents, 2 roles, 4 tools, 18 eval cases |
-| `web/` | The demo chat page |
 | `docs/` | Plan, architecture, results, guide, agnosticism log |
 
 ## Status

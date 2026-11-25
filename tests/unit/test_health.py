@@ -30,21 +30,15 @@ def test_unknown_profile_override_fails_at_startup(pack_dir: Path) -> None:
         create_app(Settings(pack=pack_dir, model_profile="nope"))
 
 
-def test_the_demo_page_is_served_only_when_its_folder_exists(
-    pack_dir: Path, tmp_path: Path
-) -> None:
+def test_the_demo_page_is_served_unless_turned_off(pack_dir: Path) -> None:
     from fastapi.testclient import TestClient
 
     from core.api.app import create_app
     from core.config import Settings
 
-    web = tmp_path / "web"
-    web.mkdir()
-    (web / "index.html").write_text("<!doctype html><title>demo</title>")
+    with_page = TestClient(create_app(Settings(pack=pack_dir)))
+    without = TestClient(create_app(Settings(pack=pack_dir, demo_page=False)))
 
-    with_page = TestClient(create_app(Settings(pack=pack_dir, web_dir=web)))
-    without = TestClient(create_app(Settings(pack=pack_dir, web_dir=None)))
-
-    assert with_page.get("/demo/").status_code == 200
-    assert "demo" in with_page.get("/demo/").text
+    page = with_page.get("/demo/")
+    assert page.status_code == 200 and "/v1/chat" in page.text
     assert without.get("/demo/").status_code == 404

@@ -4,6 +4,7 @@ import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import timedelta
+from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -48,6 +49,7 @@ TRACES_FILE = "traces.sqlite3"
 RUNS_FILE = "runs.sqlite3"
 AUDIT_FILE = "audit.sqlite3"
 CACHE_FILE = "cache.sqlite3"
+DEMO_PAGE_DIR = Path(__file__).parent / "web"
 
 
 def build_context(settings: Settings, provider_factory: ProviderFactory) -> AppContext:
@@ -203,9 +205,9 @@ def create_app(
     app.include_router(title.router)
     app.include_router(feedback.router)
     app.include_router(runs.router)
-    if settings.web_dir is not None and (settings.web_dir / "index.html").is_file():
+    if settings.demo_page:
         # A demo page only: production clients talk to the API.
-        app.mount("/demo", StaticFiles(directory=settings.web_dir, html=True), name="demo")
+        app.mount("/demo", StaticFiles(directory=DEMO_PAGE_DIR, html=True), name="demo")
     app.add_exception_handler(ProviderUnavailableError, _provider_unavailable)
     app.add_exception_handler(ProviderRequestError, _provider_rejected)
     app.add_exception_handler(StructuredOutputError, _invalid_model_output)
