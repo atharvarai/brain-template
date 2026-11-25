@@ -32,6 +32,7 @@ class PausedRun:
     expires_at: datetime
     progress: RunProgress
     chunks: tuple[Chunk, ...]  # the documents the run was grounded in, for its sources
+    user_id: str = "anonymous"  # only this user may decide the run
 
 
 class RunStore(Protocol):
@@ -94,6 +95,7 @@ class SqliteRunStore:
         body = {
             "progress": progress_to_dict(run.progress),
             "chunks": [chunk_to_dict(c) for c in run.chunks],
+            "user_id": run.user_id,
         }
         with self._lock, self._db:
             self._db.execute(
@@ -123,6 +125,7 @@ class SqliteRunStore:
             expires_at,
             progress_from_dict(data["progress"]),
             tuple(chunk_from_dict(c) for c in data["chunks"]),
+            data["user_id"],
         )
 
     def claim(self, run_id: str) -> None:

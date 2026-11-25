@@ -9,6 +9,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from core import __version__
+from core.access import AccessConfigError, SqliteAuditLog, build_access
 from core.agent import Agent, Budget, SqliteRunStore
 from core.api import chat, feedback, health, runs, title
 from core.api.context import AppContext
@@ -41,6 +42,7 @@ logger = logging.getLogger(__name__)
 
 TRACES_FILE = "traces.sqlite3"
 RUNS_FILE = "runs.sqlite3"
+AUDIT_FILE = "audit.sqlite3"
 
 
 def build_context(settings: Settings, provider_factory: ProviderFactory) -> AppContext:
@@ -72,6 +74,13 @@ def build_context(settings: Settings, provider_factory: ProviderFactory) -> AppC
             logger.warning("the document index is empty: run `make ingest` to build it")
     tools = build_tools(pack.config.tools, pack.root)
     agent = pack.config.agent
+    try:
+        access = build_access(pack)
+    except AccessConfigError as exc:
+        raise PackError(str(exc)) from exc
+    if not access.authenticator.required:
+        logger.warning("access control is off: every request is anonymous (no 'access' section)")
+    audit = SqliteAuditLog(pack.state_dir(settings.data_dir) / AUDIT_FILE)
 
     return AppContext(
         pack=pack,
@@ -92,14 +101,19 @@ def build_context(settings: Settings, provider_factory: ProviderFactory) -> AppC
                 tools,
                 Budget(agent.max_steps, agent.max_tokens, agent.max_tool_calls),
                 auto_approve=agent.auto_approve,
+                policy=access.policy,
+                audit=audit,
             ),
             runs=SqliteRunStore(pack.state_dir(settings.data_dir) / RUNS_FILE),
             approval_ttl=timedelta(minutes=agent.approval_ttl_minutes),
+            policy=access.policy,
         ),
         title_generator=TitleGenerator(
             gateway.for_tier(ModelTier.SMALL), prompts.get(TITLE_PROMPT), tracer
         ),
         tools=tools,
+        access=access,
+        audit=audit,
     )
 
 

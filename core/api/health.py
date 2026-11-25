@@ -18,6 +18,7 @@ class HealthResponse(BaseModel):
     model_profile: str
     tools: list[str]  # discovered tool names
     tool_servers_down: list[str]
+    access: str  # "jwt" when requests need a user token, "open" when they do not
 
 
 @router.get("/healthz")
@@ -30,4 +31,5 @@ def healthz(context: Annotated[AppContext, Depends(get_context)]) -> HealthRespo
         model_profile=context.model_profile,
         tools=[spec.name for spec in context.tools.specs],
         tool_servers_down=down,
+        access="jwt" if context.access.authenticator.required else "open",
     )

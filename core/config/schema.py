@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from core.config.enums import (
     EmbedderKind,
+    JwtAlgorithm,
     ModelTier,
     Provider,
     RerankerKind,
@@ -115,6 +116,9 @@ class StdioServerConfig(_Strict):
     transport: Literal[ToolTransport.STDIO]
     command: tuple[str, ...] = Field(min_length=1)
     env: dict[str, str] = Field(default_factory=dict)
+    # Names of the brain's own environment variables the server may see (for example the
+    # secret it checks user tokens with). Nothing else is passed on.
+    pass_env: tuple[str, ...] = ()
 
 
 class HttpServerConfig(_Strict):
@@ -152,6 +156,37 @@ class AgentConfig(_Strict):
     approval_ttl_minutes: int = Field(default=60, ge=1)  # a paused run expires after this
 
 
+class JwtConfig(_Strict):
+    """How the brain checks the user token the company's backend sends with each request."""
+
+    algorithm: JwtAlgorithm = JwtAlgorithm.HS256
+    secret_env: str | None = None  # HS256: name of the environment variable with the secret
+    public_key_file: str | None = None  # RS256: PEM file, relative to the pack root
+    issuer: str | None = None  # checked when set
+    audience: str | None = None  # checked when set
+    roles_claim: str = "roles"  # claim holding the user's roles, a list of strings
+    leeway_seconds: int = Field(default=30, ge=0)
+
+    @model_validator(mode="after")
+    def _has_key(self) -> Self:
+        if self.algorithm is JwtAlgorithm.HS256 and not self.secret_env:
+            raise ValueError("HS256 needs secret_env")
+        if self.algorithm is JwtAlgorithm.RS256 and not self.public_key_file:
+            raise ValueError("RS256 needs public_key_file")
+        return self
+
+
+class AccessConfig(_Strict):
+    """Who may read which documents and call which tools. Leave the section out for a brain
+    with no access control: everyone is anonymous, sees unlabelled documents only, and may
+    call every tool."""
+
+    jwt: JwtConfig
+    policy: str = "policy.yaml"  # roles to readable labels and callable tools, in the pack
+    # Demo users that `core.cli token` and the evals may sign tokens for (HS256 only).
+    dev_users: str | None = None
+
+
 class ObservabilityConfig(_Strict):
     """What each request's trace keeps. Traces always hold timings, tokens, cost, model,
     prompt versions and document ids; the user's text and the answer only if allowed here."""
@@ -166,6 +201,8 @@ class EvalsConfig(_Strict):
     min_pass_rate: float = Field(default=0.8, ge=0, le=1)  # `eval` exits non-zero below it
     judge_tier: ModelTier = ModelTier.MID  # model that grades rubric checks
     concurrency: int = Field(default=4, ge=1, le=32)
+    # With access control on: the demo user (from access.dev_users) cases run as by default.
+    default_user: str | None = None
 
 
 class BrainConfig(_Strict):
@@ -178,5 +215,6 @@ class BrainConfig(_Strict):
     rag: RagConfig | None = None
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
     agent: AgentConfig = Field(default_factory=AgentConfig)
+    access: AccessConfig | None = None
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
     evals: EvalsConfig = Field(default_factory=EvalsConfig)

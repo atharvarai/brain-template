@@ -1,6 +1,9 @@
 PACK ?= examples/edtech
+# Signs and checks demo user tokens. A development-only value: set your own in production.
+BRAIN_JWT_SECRET ?= dev-only-secret-not-for-production-0001
+export BRAIN_JWT_SECRET
 
-.PHONY: install run ingest search eval eval-retrieval traces tools mcp-server test lint check
+.PHONY: install run ingest search eval eval-retrieval traces tools mcp-server token audit test lint check
 
 install:
 	uv sync
@@ -27,9 +30,16 @@ traces:
 	BRAIN_PACK=$(PACK) uv run python -m core.cli traces
 
 # List the tools discovered from the pack's MCP servers.
-# Call one: make tools tool=get_course_progress args='{"course": "BEPY"}'
+# Call one as a demo user: make tools tool=get_course_progress args='{"course": "BEPY"}' as=riya
 tools:
-	BRAIN_PACK=$(PACK) uv run python -m core.cli tools $(if $(tool),--call $(tool) --args '$(or $(args),{})')
+	BRAIN_PACK=$(PACK) uv run python -m core.cli tools $(if $(tool),--call $(tool) --args '$(or $(args),{})') $(if $(as),--as $(as))
+
+# Sign a token for a demo user: make token as=riya
+token:
+	@BRAIN_PACK=$(PACK) uv run python -m core.cli token $(or $(as),riya)
+
+audit:
+	BRAIN_PACK=$(PACK) uv run python -m core.cli audit
 
 # Run the pack's demo MCP server over HTTP, for packs configured with transport: http.
 mcp-server:

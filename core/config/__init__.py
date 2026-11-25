@@ -2,6 +2,7 @@
 
 from core.config.enums import (
     EmbedderKind,
+    JwtAlgorithm,
     ModelTier,
     Provider,
     RerankerKind,
@@ -10,11 +11,13 @@ from core.config.enums import (
 )
 from core.config.pack import DomainPack, PackError, load_pack
 from core.config.schema import (
+    AccessConfig,
     AgentConfig,
     BrainConfig,
     EmbedderConfig,
     EvalsConfig,
     HttpServerConfig,
+    JwtConfig,
     McpServerConfig,
     ModelsConfig,
     ModelSpec,
@@ -29,6 +32,7 @@ from core.config.schema import (
 from core.config.settings import Settings
 
 __all__ = [
+    "AccessConfig",
     "AgentConfig",
     "BrainConfig",
     "DomainPack",
@@ -36,6 +40,8 @@ __all__ = [
     "EmbedderKind",
     "EvalsConfig",
     "HttpServerConfig",
+    "JwtAlgorithm",
+    "JwtConfig",
     "McpServerConfig",
     "ModelSpec",
     "ModelTier",

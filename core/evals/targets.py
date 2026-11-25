@@ -1,10 +1,12 @@
 """What an eval runs against. Strategy: the full answer path, or retrieval alone."""
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
 
+from core.access import ANONYMOUS_CALLER, Caller
 from core.agent import Decision
 from core.evals.cases import EvalCase
 from core.observability import PriceBook
@@ -41,23 +43,36 @@ class EvalTarget(Protocol):
     async def run(self, case: EvalCase) -> EvalOutcome: ...
 
 
+CallerFor = Callable[[EvalCase], Caller]
+
+
+def _anonymous(_: EvalCase) -> Caller:
+    return ANONYMOUS_CALLER
+
+
 class AnswerTarget:
     mode = EvalMode.ANSWER
 
-    def __init__(self, pipeline: Pipeline, prices: PriceBook) -> None:
+    def __init__(
+        self, pipeline: Pipeline, prices: PriceBook, caller_for: CallerFor = _anonymous
+    ) -> None:
         self._pipeline = pipeline
         self._prices = prices
+        self._caller_for = caller_for
 
     async def run(self, case: EvalCase) -> EvalOutcome:
         start = time.perf_counter()
-        answer = await self._pipeline.answer(case.messages(), operation=EVAL_OPERATION)
+        caller = self._caller_for(case)
+        answer = await self._pipeline.answer(
+            case.messages(), operation=EVAL_OPERATION, caller=caller
+        )
         asked: list[str] = []
         for _ in range(MAX_RESUMES):
             if answer.run_id is None:
                 break
             asked += [call.name for call in answer.pending]
             decisions = [Decision(call.id, case.approve) for call in answer.pending]
-            answer = await self._pipeline.resume(answer.run_id, decisions)
+            answer = await self._pipeline.resume(answer.run_id, decisions, caller)
         usage, spec = answer.completion.usage, answer.completion.spec
         return EvalOutcome(
             answer=answer.completion.text,
@@ -76,12 +91,13 @@ class AnswerTarget:
 class RetrievalTarget:
     mode = EvalMode.RETRIEVAL
 
-    def __init__(self, pipeline: Pipeline) -> None:
+    def __init__(self, pipeline: Pipeline, caller_for: CallerFor = _anonymous) -> None:
         self._pipeline = pipeline
+        self._caller_for = caller_for
 
     async def run(self, case: EvalCase) -> EvalOutcome:
         start = time.perf_counter()
-        chunks = await self._pipeline.retrieve(case.question)
+        chunks = await self._pipeline.retrieve(case.question, self._caller_for(case))
         return EvalOutcome(
             answer="",
             retrieved=tuple(f"{chunk.source}#{chunk.heading}" for chunk in chunks),

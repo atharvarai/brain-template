@@ -45,7 +45,9 @@ class FakeSource:
             raise self._open_error
         return [tool(name) for name in self._tools]
 
-    async def call(self, name: str, arguments: Mapping[str, Any]) -> ToolOutput:
+    async def call(
+        self, name: str, arguments: Mapping[str, Any], credentials: str | None = None
+    ) -> ToolOutput:
         self.calls.append((name, dict(arguments)))
         if self._delay:
             await anyio.sleep(self._delay)

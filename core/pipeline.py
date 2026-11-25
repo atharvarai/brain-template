@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
+from core.access import ANONYMOUS_CALLER, Caller, OpenPolicy, Policy
 from core.agent import (
     Agent,
     AgentEvent,
@@ -20,6 +21,7 @@ from core.agent import (
     Finished,
     InMemoryRunStore,
     PausedRun,
+    RunNotFoundError,
     RunProgress,
     RunStore,
     StepTemplate,
@@ -33,9 +35,6 @@ from core.prompts import ComposedPrompt, Prompt, PromptRef
 from core.rag import Chunk, Retriever, Source, format_documents, to_sources
 from core.tools import ToolRegistry
 
-# Until the access layer exists there is no user identity, so retrieval is limited to
-# documents with no labels. Labelled (restricted) documents are indexed but never returned.
-PUBLIC_ONLY: frozenset[str] = frozenset()
 RESUME_OPERATION = "resume"
 
 
@@ -79,6 +78,7 @@ class Pipeline:
         runs: RunStore | None = None,
         approval_ttl: timedelta = timedelta(hours=1),
         new_run_id: Callable[[], str] = lambda: uuid.uuid4().hex,
+        policy: Policy | None = None,
     ) -> None:
         self._gateway = gateway
         self._system_prompt = system_prompt
@@ -91,61 +91,86 @@ class Pipeline:
         self._runs: RunStore = runs or InMemoryRunStore()
         self._approval_ttl = approval_ttl
         self._new_run_id = new_run_id
+        self._policy: Policy = policy or OpenPolicy()
         self._prompts = (*system_prompt.refs, turn_prompt.ref)
 
-    async def retrieve(self, question: str) -> list[Chunk]:
-        """The documents a question would be answered from. Also used by retrieval evals."""
-        hits = await self._retriever.search(question, self._top_k, PUBLIC_ONLY)
+    async def retrieve(self, question: str, caller: Caller = ANONYMOUS_CALLER) -> list[Chunk]:
+        """The documents a question would be answered from, limited to what this user may
+        read: unlabelled documents plus the labels the policy gives their roles."""
+        allowed = self._policy.allowed_labels(caller.user)
+        hits = await self._retriever.search(question, self._top_k, allowed)
         return [hit.chunk for hit in hits]
 
-    async def answer(self, messages: Sequence[Message], *, operation: str = "chat") -> Answer:
-        return await _last(self._turn(messages, operation, stream=False))
+    async def answer(
+        self,
+        messages: Sequence[Message],
+        *,
+        operation: str = "chat",
+        caller: Caller = ANONYMOUS_CALLER,
+    ) -> Answer:
+        return await _last(self._turn(messages, operation, caller, stream=False))
 
     def stream(
-        self, messages: Sequence[Message], *, operation: str = "chat"
+        self,
+        messages: Sequence[Message],
+        *,
+        operation: str = "chat",
+        caller: Caller = ANONYMOUS_CALLER,
     ) -> AsyncIterator[PipelineEvent]:
         """Yield ``TextDelta`` and ``ToolActivity`` events, then exactly one ``Answer``."""
-        return self._turn(messages, operation, stream=True)
+        return self._turn(messages, operation, caller, stream=True)
 
-    async def resume(self, run_id: str, decisions: Sequence[Decision]) -> Answer:
+    async def resume(
+        self, run_id: str, decisions: Sequence[Decision], caller: Caller = ANONYMOUS_CALLER
+    ) -> Answer:
         """Apply a person's decisions to a paused run and carry it on to an answer."""
-        return await _last(self.resume_stream(run_id, decisions, stream=False))
+        return await _last(self.resume_stream(run_id, decisions, caller, stream=False))
 
     async def resume_stream(
-        self, run_id: str, decisions: Sequence[Decision], *, stream: bool = True
+        self,
+        run_id: str,
+        decisions: Sequence[Decision],
+        caller: Caller = ANONYMOUS_CALLER,
+        *,
+        stream: bool = True,
     ) -> AsyncIterator[PipelineEvent]:
         # Check everything before claiming, so a bad request does not use up the approval.
         paused = self._runs.get(run_id)
+        if paused.user_id != caller.user.id:  # someone else's run looks like no run at all
+            raise RunNotFoundError(f"no paused run {run_id}")
         validate_decisions(paused.progress.pending, decisions)
         self._runs.claim(run_id)
         async with self._tracer.trace(RESUME_OPERATION) as trace:
-            trace.set(resumes=run_id)
+            trace.set(resumes=run_id, user=caller.user.id)
             trace.record_prompts(str(ref) for ref in self._prompts)
             events = self._agent.resume(
                 self._gateway.for_tier(self._default_tier),
-                self._template(),
+                self._template(caller),
                 paused.progress,
                 decisions,
                 trace,
                 stream=stream,
+                caller=caller,
             )
-            async for event in self._relay(events, paused.progress, paused.chunks, trace):
+            async for event in self._relay(events, paused.progress, paused.chunks, trace, caller):
                 yield event
 
     async def _turn(
-        self, messages: Sequence[Message], operation: str, *, stream: bool
+        self, messages: Sequence[Message], operation: str, caller: Caller, *, stream: bool
     ) -> AsyncIterator[PipelineEvent]:
         async with self._tracer.trace(operation) as trace:
-            turn, chunks = await self._prepare(messages, trace)
+            trace.set(user=caller.user.id)
+            turn, chunks = await self._prepare(messages, trace, caller)
             progress = RunProgress(messages=list(turn))
             events = self._agent.run(
                 self._gateway.for_tier(self._default_tier),
-                self._template(),
+                self._template(caller),
                 progress,
                 trace,
                 stream=stream,
+                caller=caller,
             )
-            async for event in self._relay(events, progress, chunks, trace):
+            async for event in self._relay(events, progress, chunks, trace, caller):
                 yield event
 
     async def _relay(
@@ -154,6 +179,7 @@ class Pipeline:
         progress: RunProgress,
         chunks: Sequence[Chunk],
         trace: ActiveTrace,
+        caller: Caller,
     ) -> AsyncIterator[PipelineEvent]:
         """Pass text and tool events through; turn the agent's ending into an ``Answer``."""
         async for event in events:
@@ -162,23 +188,24 @@ class Pipeline:
             elif isinstance(event, Finished):
                 yield self._finish(event.completion, progress, chunks, trace)
             elif isinstance(event, ApprovalRequired):
-                run_id = self._pause(progress, chunks)
+                run_id = self._pause(progress, chunks, caller)
                 trace.set(run_id=run_id)
                 yield self._finish(
                     progress.completion(), progress, chunks, trace, run_id, event.pending
                 )
 
-    def _pause(self, progress: RunProgress, chunks: Sequence[Chunk]) -> str:
+    def _pause(self, progress: RunProgress, chunks: Sequence[Chunk], caller: Caller) -> str:
         now = datetime.now(UTC)
         run_id = self._new_run_id()
-        self._runs.save(PausedRun(run_id, now, now + self._approval_ttl, progress, tuple(chunks)))
+        expires = now + self._approval_ttl
+        self._runs.save(PausedRun(run_id, now, expires, progress, tuple(chunks), caller.user.id))
         return run_id
 
-    def _template(self) -> StepTemplate:
-        return StepTemplate(self._system_prompt.text, self._agent.tools.specs)
+    def _template(self, caller: Caller) -> StepTemplate:
+        return StepTemplate(self._system_prompt.text, self._agent.tools_for(caller))
 
     async def _prepare(
-        self, messages: Sequence[Message], trace: ActiveTrace
+        self, messages: Sequence[Message], trace: ActiveTrace, caller: Caller
     ) -> tuple[list[Message], list[Chunk]]:
         """Retrieve for the latest question and rewrite that turn to carry the documents.
 
@@ -189,7 +216,7 @@ class Pipeline:
         trace.record_prompts(str(ref) for ref in self._prompts)
         trace.capture(input=last.content)
         with trace.span("retrieve", k=self._top_k) as span:
-            chunks = await self.retrieve(last.content)
+            chunks = await self.retrieve(last.content, caller)
             span["hits"] = len(chunks)
         turn = self._turn_prompt.render(documents=format_documents(chunks), question=last.content)
         return [*history, Message(Role.USER, turn)], chunks

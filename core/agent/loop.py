@@ -13,6 +13,16 @@ import asyncio
 import time
 from collections.abc import AsyncIterator, Collection, Mapping, Sequence
 
+from core.access import (
+    ANONYMOUS_CALLER,
+    AuditAction,
+    AuditEntry,
+    AuditLog,
+    Caller,
+    InMemoryAuditLog,
+    OpenPolicy,
+    Policy,
+)
 from core.agent.errors import DecisionError
 from core.agent.types import (
     AgentEvent,
@@ -34,10 +44,12 @@ from core.llm import (
     ToolCall,
     ToolChoice,
     ToolResult,
+    ToolSpec,
 )
 from core.observability import ActiveTrace
 from core.tools import ToolExecutor
 
+DENIED = "Not run: you do not have permission to use this tool."
 DECLINED = (
     "Not run: the user chose not to approve this action. Tell them plainly that it was not "
     "done because they declined it; it did not fail, so do not offer to retry it unasked."
@@ -50,14 +62,22 @@ class Agent:
         tools: ToolExecutor,
         budget: Budget | None = None,
         auto_approve: Collection[str] = (),
+        policy: Policy | None = None,
+        audit: AuditLog | None = None,
     ) -> None:
         self._tools = tools
         self._budget = budget or Budget()
         self._auto_approve = frozenset(auto_approve)
+        self._policy: Policy = policy or OpenPolicy()
+        self._audit: AuditLog = audit or InMemoryAuditLog()
 
     @property
     def tools(self) -> ToolExecutor:
         return self._tools
+
+    def tools_for(self, caller: Caller) -> tuple[ToolSpec, ...]:
+        """The tools this user may call. The model is never shown the others."""
+        return tuple(s for s in self._tools.specs if self._policy.can_call(caller.user, s.name))
 
     def needs_approval(self, name: str) -> bool:
         """Tools that may change data wait for a person. Unknown names never run anyway."""
@@ -72,6 +92,7 @@ class Agent:
         trace: ActiveTrace,
         *,
         stream: bool,
+        caller: Caller = ANONYMOUS_CALLER,
     ) -> AsyncIterator[AgentEvent]:
         while True:
             last_step = not template.tools or self._exhausted(progress) is not None
@@ -95,7 +116,7 @@ class Agent:
 
             calls = completion.tool_calls
             progress.messages.append(Message(Role.ASSISTANT, completion.text, tool_calls=calls))
-            results, waiting, activity = await self._run_batch(calls, progress, trace)
+            results, waiting, activity = await self._run_batch(calls, progress, trace, caller)
             for item in activity:
                 yield item
             if waiting:
@@ -115,6 +136,7 @@ class Agent:
         trace: ActiveTrace,
         *,
         stream: bool,
+        caller: Caller = ANONYMOUS_CALLER,
     ) -> AsyncIterator[AgentEvent]:
         """Act on the decisions for a paused run, then carry on with the loop."""
         by_id = validate_decisions(progress.pending, decisions)
@@ -122,17 +144,26 @@ class Agent:
         for call in progress.pending:
             decision = by_id[call.id]
             trace.event("approval_decided", tool=call.name, approved=decision.approve)
+            outcome = "approved" if decision.approve else "declined"
+            self._audit.record(
+                AuditEntry.of(
+                    AuditAction.APPROVAL, caller.user, call.name, outcome,
+                    trace_id=trace.trace_id, detail={"arguments": dict(call.arguments)},
+                )
+            )  # fmt: skip
             if not decision.approve:
                 note = f" Their note: {decision.note}" if decision.note else ""
                 progress.held[call.id] = ToolResult(call.id, call.name, DECLINED + note, True)
-        results, activity = await self._execute(approved, progress, trace)
+        results, activity = await self._execute(approved, progress, trace, caller)
         progress.held.update(results)
         for item in activity:
             yield item
         batch, held = list(progress.batch), progress.held
         progress.pending, progress.held, progress.batch = (), {}, ()
         self._append_results(progress, batch, held, trace)
-        async for event in self.run(provider, template, progress, trace, stream=stream):
+        async for event in self.run(
+            provider, template, progress, trace, stream=stream, caller=caller
+        ):
             yield event
 
     # --- one step -------------------------------------------------------------------------
@@ -175,7 +206,11 @@ class Agent:
     # --- tools ----------------------------------------------------------------------------
 
     async def _run_batch(
-        self, calls: Sequence[ToolCall], progress: RunProgress, trace: ActiveTrace
+        self,
+        calls: Sequence[ToolCall],
+        progress: RunProgress,
+        trace: ActiveTrace,
+        caller: Caller,
     ) -> tuple[dict[str, ToolResult], tuple[ToolCall, ...], list[ToolActivity]]:
         """Run what may run now. Returns the results so far, the calls waiting for approval
         and the tool runs that happened.
@@ -193,23 +228,45 @@ class Agent:
             )
             for call in over
         }  # fmt: skip
-        waiting = tuple(call for call in allowed if self.needs_approval(call.name))
-        now = [call for call in allowed if call not in waiting]
+        permitted = []
+        for call in allowed:  # checked again here: the model may name a tool it was not shown
+            if self._policy.can_call(caller.user, call.name):
+                permitted.append(call)
+                continue
+            results[call.id] = ToolResult(call.id, call.name, DENIED, is_error=True)
+            trace.event("tool_denied", tool=call.name)
+            self._audit.record(
+                AuditEntry.of(AuditAction.TOOL_DENIED, caller.user, call.name, "denied",
+                              trace_id=trace.trace_id)
+            )  # fmt: skip
+        waiting = tuple(call for call in permitted if self.needs_approval(call.name))
+        now = [call for call in permitted if call not in waiting]
         progress.tool_calls += len(allowed)
-        ran, activity = await self._execute(now, progress, trace)
+        ran, activity = await self._execute(now, progress, trace, caller)
         results.update(ran)
         return results, waiting, activity
 
     async def _execute(
-        self, calls: Sequence[ToolCall], progress: RunProgress, trace: ActiveTrace
+        self,
+        calls: Sequence[ToolCall],
+        progress: RunProgress,
+        trace: ActiveTrace,
+        caller: Caller,
     ) -> tuple[dict[str, ToolResult], list[ToolActivity]]:
         step = progress.steps
 
         async def run(call: ToolCall) -> tuple[ToolResult, ToolActivity]:
             start = time.perf_counter()
             with trace.span("tool", tool=call.name, step=step) as span:
-                result = await self._tools.run(call)
+                result = await self._tools.run(call, caller.token)
                 span["ok"] = not result.is_error
+            self._audit.record(
+                AuditEntry.of(
+                    AuditAction.TOOL_CALL, caller.user, call.name,
+                    "error" if result.is_error else "ok",
+                    trace_id=trace.trace_id, detail={"arguments": dict(call.arguments)},
+                )
+            )  # fmt: skip
             elapsed = round((time.perf_counter() - start) * 1000)
             return result, ToolActivity(call.name, not result.is_error, elapsed, step)
 

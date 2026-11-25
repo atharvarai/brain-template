@@ -7,9 +7,10 @@ from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
+from core.access import Caller
 from core.agent import Decision, DecisionError, RunClosedError, RunNotFoundError
 from core.api.chat import ChatMetadata, ChatResponse, sse_response
-from core.api.context import AppContext, get_context
+from core.api.context import AppContext, get_caller, get_context
 from core.pipeline import PipelineEvent
 
 router = APIRouter(prefix="/v1", tags=["runs"])
@@ -34,7 +35,10 @@ class DecisionsRequest(BaseModel):
                422: {"description": "Decisions do not match the pending actions"}},
 )  # fmt: skip
 async def decide(
-    run_id: str, body: DecisionsRequest, context: Annotated[AppContext, Depends(get_context)]
+    run_id: str,
+    body: DecisionsRequest,
+    context: Annotated[AppContext, Depends(get_context)],
+    caller: Annotated[Caller, Depends(get_caller)],
 ) -> ChatResponse | StreamingResponse:
     """Approve or decline every pending action of a paused run, then get the answer.
 
@@ -44,10 +48,10 @@ async def decide(
     pipeline = context.pipeline
     try:
         if body.stream:
-            events = pipeline.resume_stream(run_id, decisions)
+            events = pipeline.resume_stream(run_id, decisions, caller)
             first = await anext(events)  # surfaces 404/409/422 before the stream starts
             return sse_response(_prepend(first, events))
-        answer = await pipeline.resume(run_id, decisions)
+        answer = await pipeline.resume(run_id, decisions, caller)
     except RunNotFoundError as exc:
         raise HTTPException(404, str(exc)) from exc
     except RunClosedError as exc:

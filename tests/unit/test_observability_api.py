@@ -44,11 +44,13 @@ def test_a_json_answer_returns_its_trace_id_and_the_trace_explains_it(pack_dir: 
     assert trace.status is TraceStatus.OK
     assert (trace.provider, trace.model) == ("fake", "fake-1")
     assert [s.name for s in trace.spans] == ["retrieve", "generate"]
-    assert [p.split("#")[0] for p in trace.prompts] == ["system@v4", "persona@v1", "rag_turn@v1"]
+    assert [p.split("#")[0] for p in trace.prompts] == ["system@v5", "persona@v1", "rag_turn@v1"]
     assert trace.output_tokens == body["usage"]["output_tokens"]
     assert trace.cost_usd is None  # the test pack declares no prices
     assert trace.input is None and trace.output is None  # content capture is off by default
-    assert trace.attributes == {"pack": "Acme", "profile": "test", "steps": 1, "tool_calls": 0}
+    assert trace.attributes == {
+        "pack": "Acme", "profile": "test", "user": "anonymous", "steps": 1, "tool_calls": 0,
+    }  # fmt: skip
 
 
 def test_prices_and_content_capture_come_from_the_pack(pack_dir: Path) -> None:

@@ -39,6 +39,16 @@ def isolated_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return data_dir
 
 
+TEST_JWT_SECRET = "test-secret-for-unit-tests-only-0123456789"
+
+
+@pytest.fixture(autouse=True)
+def jwt_secret(monkeypatch: pytest.MonkeyPatch) -> str:
+    """The example pack signs and checks user tokens with this variable."""
+    monkeypatch.setenv("BRAIN_JWT_SECRET", TEST_JWT_SECRET)
+    return TEST_JWT_SECRET
+
+
 @pytest.fixture
 def anyio_backend() -> str:
     """Run async tests on asyncio only."""

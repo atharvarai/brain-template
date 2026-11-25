@@ -47,3 +47,10 @@ class ToolTransport(StrEnum):
 
     STDIO = "stdio"  # the brain starts the server as a child process: local development
     HTTP = "http"  # Streamable HTTP to a server the company runs: production
+
+
+class JwtAlgorithm(StrEnum):
+    """How user tokens are signed."""
+
+    HS256 = "HS256"  # shared secret: simple, fine when one backend issues and checks tokens
+    RS256 = "RS256"  # key pair: the brain holds only the public key

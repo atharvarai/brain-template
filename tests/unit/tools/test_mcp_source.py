@@ -10,7 +10,8 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError as ServerToolError
 from mcp_types import ToolAnnotations
 
-from core.config import ToolsConfig
+from core.access import DevTokenIssuer
+from core.config import ToolsConfig, load_pack
 from core.llm import ToolCall
 from core.tools import McpToolSource, ToolRegistry, build_tools
 from examples.edtech.mcp_server.server import build_server
@@ -71,9 +72,18 @@ async def test_calling_before_open_is_a_programming_error() -> None:
 # --- the Skilvanta demo server --------------------------------------------------------------
 
 
-async def run(tool: str, **arguments: object) -> tuple[dict | str, bool]:
+def token(handle: str = "riya") -> str:
+    pack = load_pack(EDTECH_PACK)
+    assert pack.config.access is not None
+    return DevTokenIssuer(pack.config.access, pack.root).issue(handle)
+
+
+async def run(
+    tool: str, as_user: str | None = "riya", **arguments: object
+) -> tuple[dict | str, bool]:
+    credentials = token(as_user) if as_user else None
     async with ToolRegistry([McpToolSource("skilvanta", build_server())]) as registry:
-        result = await registry.run(ToolCall("c1", tool, arguments))
+        result = await registry.run(ToolCall("c1", tool, arguments), credentials)
     try:
         return json.loads(result.content), result.is_error
     except json.JSONDecodeError:
@@ -116,7 +126,7 @@ async def test_demo_slots_stay_inside_the_window_asked_for() -> None:
 async def test_the_pack_starts_its_server_over_stdio() -> None:
     """End to end through a real child process, as `make run` does."""
     config = ToolsConfig.model_validate(
-        {"servers": {"skilvanta": {"transport": "stdio",
+        {"servers": {"skilvanta": {"transport": "stdio", "pass_env": ["BRAIN_JWT_SECRET"],
                                    "command": ["python", "mcp_server/server.py"]}}}
     )  # fmt: skip
 
@@ -124,13 +134,15 @@ async def test_the_pack_starts_its_server_over_stdio() -> None:
         names = {s.name for s in registry.specs}
         assert names == {
             "get_my_enrollments", "get_course_progress", "list_mentor_slots",
-            "book_mentor_session", "request_refund",
+            "get_mentee_progress", "book_mentor_session", "request_refund",
         }  # fmt: skip
         writes = {name for name in names if not registry.is_read_only(name)}
         assert writes == {"book_mentor_session", "request_refund"}
-        result = await registry.run(ToolCall("c1", "get_my_enrollments", {}))
+        result = await registry.run(ToolCall("c1", "get_my_enrollments", {}), token("riya"))
+        anonymous = await registry.run(ToolCall("c2", "get_my_enrollments", {}))
 
-    assert "Riya Kulkarni" in result.content
+    assert "Riya Kulkarni" in result.content  # the token crossed the process boundary
+    assert anonymous.is_error and "Not signed in" in anonymous.content
 
 
 async def test_a_server_that_cannot_start_leaves_the_brain_without_its_tools(
@@ -186,12 +198,15 @@ async def test_a_dead_server_is_reconnected_on_a_later_call(tmp_path: Path) -> N
 
 
 async def test_demo_booking_uses_a_session_and_takes_the_slot() -> None:
+    riya = token("riya")
     async with ToolRegistry([McpToolSource("skilvanta", build_server())]) as registry:
         booked = await registry.run(
-            ToolCall("c1", "book_mentor_session", {"slot_ist": "2026-11-27T19:00", "agenda": "A7"})
+            ToolCall("c1", "book_mentor_session", {"slot_ist": "2026-11-27T19:00", "agenda": "A7"}),
+            riya,
         )
         twice = await registry.run(
-            ToolCall("c2", "book_mentor_session", {"slot_ist": "2026-11-29T11:00", "agenda": "x"})
+            ToolCall("c2", "book_mentor_session", {"slot_ist": "2026-11-29T11:00", "agenda": "x"}),
+            riya,
         )
 
     body = json.loads(booked.content)
@@ -214,3 +229,33 @@ def test_refund_rules_match_the_worked_example_in_the_docs() -> None:
     assert _refund_estimate(85_000, 5, 1)[0] == 85_000
     assert _refund_estimate(85_000, 15, 0)[0] == 42_500
     assert _refund_estimate(85_000, 25, 0)[0] == 0
+
+
+@pytest.mark.parametrize(
+    ("as_user", "learner", "allowed"),
+    [
+        ("arjun", "L-1042", True),  # his own mentee
+        ("arjun", "L-1077", False),  # someone else's mentee
+        ("sana", "L-1077", True),  # support sees every learner
+        ("riya", "L-1077", False),  # a learner is not staff
+    ],
+)
+async def test_the_demo_server_applies_its_own_rules_to_each_user(
+    as_user: str, learner: str, allowed: bool
+) -> None:
+    course = "BEPY" if learner == "L-1042" else "DSML"
+    _, is_error = await run("get_mentee_progress", as_user, learner_id=learner, course=course)
+    assert is_error is not allowed
+
+
+async def test_the_demo_server_refuses_missing_and_forged_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    message, is_error = await run("get_my_enrollments", None)
+    assert is_error and "Not signed in" in str(message)
+
+    forged = token("riya")
+    monkeypatch.setenv("BRAIN_JWT_SECRET", "a-different-secret-the-server-does-not-know-xx")
+    async with ToolRegistry([McpToolSource("skilvanta", build_server())]) as registry:
+        result = await registry.run(ToolCall("c1", "get_my_enrollments", {}), forged)
+    assert result.is_error and "not accepted" in result.content

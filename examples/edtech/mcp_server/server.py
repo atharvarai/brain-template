@@ -7,8 +7,10 @@ Run it:
     python mcp_server/server.py                      # stdio: the brain starts it itself
     python mcp_server/server.py --http --port 8792   # Streamable HTTP at /mcp
 
-Until the access layer forwards the user's token (milestone M7), every call acts as one demo
-learner, chosen with SKILVANTA_LEARNER_ID (default L-1042).
+Every call runs as the user whose token the brain forwards: in the Authorization header over
+HTTP, or in the request's _meta over stdio. The server checks the token itself (same secret,
+issuer and audience as the brain) and applies its own rules, for example a mentor sees only
+their own mentees. The brain's policy is the first gate; this is the second.
 
 Read tools carry MCP's readOnlyHint. The brain runs those at once; the others (booking a
 session, requesting a refund) change data, so the brain asks the user to approve them first.
@@ -22,14 +24,17 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Any
 
-from mcp.server.mcpserver import MCPServer
+import jwt
+from mcp.server.mcpserver import Context, MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp_types import ToolAnnotations
 
 # The demo is pinned to one date so its answers, and the eval cases, stay stable.
 DEMO_TODAY = date(2026, 11, 25)
 SESSIONS_PER_MONTH = 2  # matches docs/mentorship-sessions.md
-DEFAULT_LEARNER = "L-1042"
+TOKEN_SECRET_ENV = "BRAIN_JWT_SECRET"
+TOKEN_ISSUER, TOKEN_AUDIENCE = "skilvanta-backend", "skilvanta-brain"
+AUTH_META_KEY = "io.brain/authorization"  # how the brain sends the token over stdio
 
 
 @dataclass(frozen=True)
@@ -117,6 +122,8 @@ LEARNERS: dict[str, dict[str, Any]] = {
     },
 }
 
+MENTORS = {"M-201": "Arjun Desai", "M-202": "Meera Iyer"}
+
 MENTOR_SLOTS: dict[str, list[str]] = {  # IST, ISO 8601
     "Arjun Desai": [
         "2026-11-27T19:00", "2026-11-29T11:00", "2026-12-02T20:00", "2026-12-04T19:30",
@@ -146,11 +153,39 @@ def _refund_estimate(fee: int, day: int, classes_attended: int) -> tuple[int, st
     return 0, "no refund: requested after day 21"
 
 
-def _learner() -> tuple[str, dict[str, Any]]:
-    learner_id = os.environ.get("SKILVANTA_LEARNER_ID", DEFAULT_LEARNER)
-    if learner_id not in LEARNERS:
-        raise ToolError(f"No learner account found for id {learner_id}.")
-    return learner_id, LEARNERS[learner_id]
+@dataclass(frozen=True)
+class Caller:
+    id: str
+    roles: frozenset[str]
+
+
+def _caller(ctx: Context) -> Caller:
+    """Who is calling, from a verified token. Anything else is refused."""
+    header = (ctx.headers or {}).get("authorization", "")
+    meta = ctx.request_context.meta or {}
+    bearer = header or str(meta.get(AUTH_META_KEY, ""))
+    scheme, _, token = bearer.partition(" ")
+    if scheme.lower() != "bearer" or not token:
+        raise ToolError("Not signed in: this tool needs the user's token.")
+    try:
+        claims = jwt.decode(
+            token,
+            os.environ.get(TOKEN_SECRET_ENV, ""),
+            algorithms=["HS256"],
+            issuer=TOKEN_ISSUER,
+            audience=TOKEN_AUDIENCE,
+            options={"require": ["sub", "exp"]},
+        )
+    except jwt.PyJWTError as exc:
+        raise ToolError("The user's token was not accepted.") from exc
+    return Caller(str(claims["sub"]), frozenset(claims.get("roles") or []))
+
+
+def _learner(ctx: Context) -> tuple[str, dict[str, Any]]:
+    caller = _caller(ctx)
+    if "learner" not in caller.roles or caller.id not in LEARNERS:
+        raise ToolError("Only a learner can use this tool, for their own account.")
+    return caller.id, LEARNERS[caller.id]
 
 
 def _find_course(query: str) -> Course | None:
@@ -170,10 +205,10 @@ def build_server() -> MCPServer:
     )
 
     @server.tool(annotations=READ_ONLY)
-    def get_my_enrollments() -> dict[str, Any]:
+    def get_my_enrollments(ctx: Context) -> dict[str, Any]:
         """List the courses the signed-in learner is enrolled in, with batch, status
         (active, paused or completed), start and end dates, and fee payment status."""
-        learner_id, learner = _learner()
+        learner_id, learner = _learner(ctx)
         return {
             "learner_id": learner_id,
             "name": learner["name"],
@@ -185,11 +220,11 @@ def build_server() -> MCPServer:
         }
 
     @server.tool(annotations=READ_ONLY)
-    def get_course_progress(course: str) -> dict[str, Any]:
+    def get_course_progress(course: str, ctx: Context) -> dict[str, Any]:
         """Progress of the signed-in learner in one of their courses: modules or weeks
         completed, current module, live-class attendance and pending assignments with due
         dates. `course` is a course id (FSWD, DSML, BEPY, DSA) or the course name."""
-        _, learner = _learner()
+        _, learner = _learner(ctx)
         found = _find_course(course)
         if found is None:
             known = ", ".join(f"{c.id} ({c.name})" for c in COURSES.values())
@@ -203,12 +238,12 @@ def build_server() -> MCPServer:
         return {"course": found.name, "status": enrollment["status"], **enrollment["progress"]}
 
     @server.tool(annotations=READ_ONLY)
-    def list_mentor_slots(days_ahead: int = 7) -> dict[str, Any]:
+    def list_mentor_slots(ctx: Context, days_ahead: int = 7) -> dict[str, Any]:
         """Open slots on the signed-in learner's mentor's calendar for the next `days_ahead`
         days (1 to 14), in IST, and how many 1:1 sessions the learner has left this month."""
         if not 1 <= days_ahead <= 14:
             raise ToolError("days_ahead must be between 1 and 14.")
-        _, learner = _learner()
+        _, learner = _learner(ctx)
         mentor = learner["mentor"]
         until = DEMO_TODAY + timedelta(days=days_ahead)
         slots = [
@@ -226,13 +261,37 @@ def build_server() -> MCPServer:
             "note": "Slots in a new month count against that month's two sessions.",
         }
 
+    @server.tool(annotations=READ_ONLY)
+    def get_mentee_progress(learner_id: str, course: str, ctx: Context) -> dict[str, Any]:
+        """Staff only: one learner's progress in a course. A mentor sees only their own
+        mentees; support agents and admins see any learner. `course` is a course id or name."""
+        caller = _caller(ctx)
+        learner = LEARNERS.get(learner_id)
+        if learner is None:
+            raise ToolError(f"No learner with id {learner_id}.")
+        is_staff = bool(caller.roles & {"support_agent", "admin"})
+        is_their_mentor = "mentor" in caller.roles and MENTORS.get(caller.id) == learner["mentor"]
+        if not (is_staff or is_their_mentor):
+            raise ToolError(f"Not permitted: {learner_id} is not one of your mentees.")
+        found = _find_course(course)
+        enrollment = learner["enrollments"].get(found.id) if found else None
+        if found is None or enrollment is None:
+            raise ToolError(f"{learner_id} is not enrolled in '{course}'.")
+        return {
+            "learner_id": learner_id,
+            "name": learner["name"],
+            "course": found.name,
+            "status": enrollment["status"],
+            **enrollment["progress"],
+        }
+
     @server.tool()
-    def book_mentor_session(slot_ist: str, agenda: str) -> dict[str, Any]:
+    def book_mentor_session(slot_ist: str, agenda: str, ctx: Context) -> dict[str, Any]:
         """Book a 45-minute 1:1 session with the signed-in learner's mentor. `slot_ist` must
         be one of the open slots from list_mentor_slots, exactly as listed (for example
         2026-11-27T19:00). `agenda` is a short note on what the learner wants to cover.
         Uses one of the learner's two sessions for that slot's month."""
-        _, learner = _learner()
+        _, learner = _learner(ctx)
         mentor = learner["mentor"]
         open_slots = MENTOR_SLOTS.get(mentor, [])
         if slot_ist not in open_slots:
@@ -256,11 +315,11 @@ def build_server() -> MCPServer:
         }
 
     @server.tool()
-    def request_refund(course: str, reason: str) -> dict[str, Any]:
+    def request_refund(course: str, reason: str, ctx: Context) -> dict[str, Any]:
         """Submit a refund request for one of the signed-in learner's courses, for support to
         review. Returns the request id and the refund the policy gives on today's date
         (counted in days from purchase). Submitting does not cancel the course by itself."""
-        _, learner = _learner()
+        _, learner = _learner(ctx)
         found = _find_course(course)
         enrollment = learner["enrollments"].get(found.id) if found else None
         if found is None or enrollment is None:

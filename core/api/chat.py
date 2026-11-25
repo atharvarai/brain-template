@@ -9,8 +9,9 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, model_validator
 
+from core.access import Caller
 from core.agent import ToolActivity
-from core.api.context import AppContext, get_context
+from core.api.context import AppContext, get_caller, get_context
 from core.api.schemas import (
     CallMetadata,
     ChatMessage,
@@ -99,12 +100,14 @@ def sse_response(events: AsyncIterator[PipelineEvent]) -> StreamingResponse:
 
 @router.post("/chat", response_model=ChatResponse)
 async def chat(
-    body: ChatRequest, context: Annotated[AppContext, Depends(get_context)]
+    body: ChatRequest,
+    context: Annotated[AppContext, Depends(get_context)],
+    caller: Annotated[Caller, Depends(get_caller)],
 ) -> ChatResponse | StreamingResponse:
     pipeline = context.pipeline
     messages = [message.to_message() for message in body.messages]
     if body.stream:
-        return sse_response(pipeline.stream(messages))
-    answer = await pipeline.answer(messages)
+        return sse_response(pipeline.stream(messages, caller=caller))
+    answer = await pipeline.answer(messages, caller=caller)
     metadata = ChatMetadata.from_answer(answer)
     return ChatResponse(text=answer.completion.text, **metadata.model_dump())

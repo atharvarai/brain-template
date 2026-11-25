@@ -72,6 +72,18 @@ class ChunkStore(Protocol):
     ) -> list[ScoredChunk]: ...
 
 
+def _label_filter(allowed: frozenset[str] | None) -> tuple[str, tuple[str, ...]]:
+    """SQL that keeps a chunk only if every one of its labels is allowed (``None``: all)."""
+    if allowed is None:
+        return "", ()
+    marks = ",".join("?" * len(allowed))
+    inner = f"value NOT IN ({marks})" if allowed else "1"
+    return (
+        f" AND NOT EXISTS (SELECT 1 FROM json_each(c.labels) WHERE {inner})",
+        tuple(sorted(allowed)),
+    )
+
+
 def _visible(labels: frozenset[str], allowed: frozenset[str] | None) -> bool:
     return allowed is None or labels <= allowed
 
@@ -151,13 +163,12 @@ class SqliteChunkStore:
         chunks, matrix = self._load_all()
         if not chunks:
             return []
+        # Hidden chunks are masked out before ranking, never ranked and then dropped.
+        visible = np.array([_visible(c.labels, allowed_labels) for c in chunks])
         scores = matrix @ np.asarray(vector, dtype=np.float32)  # cosine: rows are unit length
-        ranked = [
-            ScoredChunk(chunks[index], float(scores[index]))
-            for index in np.argsort(-scores)
-            if _visible(chunks[index].labels, allowed_labels)
-        ]
-        return ranked[:k]
+        scores = np.where(visible, scores, -np.inf)
+        order = [i for i in np.argsort(-scores)[:k] if visible[i]]
+        return [ScoredChunk(chunks[i], float(scores[i])) for i in order]
 
     def keyword_search(
         self, query: str, k: int, allowed_labels: frozenset[str] | None
@@ -169,15 +180,15 @@ class SqliteChunkStore:
             return []
         # Quote every word so user text can never be read as FTS5 query syntax.
         match = " OR ".join(f'"{word}"' for word in dict.fromkeys(words))
+        access, params = _label_filter(allowed_labels)
         with self._lock:
             rows = self._db.execute(
                 "SELECT c.source, c.position, c.title, c.heading, c.text, c.labels,"
                 " bm25(chunks_fts) FROM chunks_fts JOIN chunks c ON c.id = chunks_fts.rowid"
-                " WHERE chunks_fts MATCH ? ORDER BY bm25(chunks_fts)",
-                (match,),
+                f" WHERE chunks_fts MATCH ?{access} ORDER BY bm25(chunks_fts) LIMIT ?",
+                (match, *params, k),
             ).fetchall()
-        ranked = [ScoredChunk(_chunk(row), -float(row[6])) for row in rows]  # bm25: lower=better
-        return [hit for hit in ranked if _visible(hit.chunk.labels, allowed_labels)][:k]
+        return [ScoredChunk(_chunk(row), -float(row[6])) for row in rows]  # bm25: lower=better
 
     def _delete(self, source: str) -> None:
         ids = [

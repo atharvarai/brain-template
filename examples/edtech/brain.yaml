@@ -25,8 +25,21 @@ tools:
     skilvanta:
       transport: stdio
       command: [python, mcp_server/server.py]
+      pass_env: [BRAIN_JWT_SECRET]  # the server checks user tokens itself
   timeout_seconds: 10
   max_result_chars: 4000
+
+# Every request carries the user's token (a JWT from Skilvanta's backend). Roles in the token
+# decide which documents and tools the user gets (policy.yaml), and tools run as the user:
+# the token goes on to the MCP server, which checks it again.
+access:
+  jwt:
+    algorithm: HS256
+    secret_env: BRAIN_JWT_SECRET
+    issuer: skilvanta-backend
+    audience: skilvanta-brain
+  policy: policy.yaml
+  dev_users: seed/users.yaml  # demo users for `core.cli token` and the evals
 
 # Each profile maps every tier to an ordered fallback chain.
 # Pick one with `active`, or override per process with BRAIN_MODEL_PROFILE.
@@ -82,3 +95,4 @@ evals:
   min_pass_rate: 0.85
   judge_tier: mid
   concurrency: 4
+  default_user: riya  # cases run as this demo user unless they name another

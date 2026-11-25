@@ -14,18 +14,24 @@ from contextlib import AsyncExitStack
 from typing import Any
 
 import anyio
+import httpx2
 from anyio.abc import TaskStatus
 from mcp import Client
 from mcp.client.stdio import StdioServerParameters
+from mcp.client.streamable_http import streamable_http_client
 from mcp.server.mcpserver import MCPServer
 from mcp.shared.exceptions import MCPError
-from mcp_types import CONNECTION_CLOSED, CallToolResult, Implementation
+from mcp_types import CONNECTION_CLOSED, CallToolResult, Implementation, RequestParamsMeta
 
 from core import __version__
 from core.llm import ToolSpec
 from core.tools.source import ToolInfo, ToolOutput
 
 logger = logging.getLogger(__name__)
+
+# Over stdio there are no headers, so the user's token travels in the request's ``_meta``
+# under this key (local development only). Over HTTP it is the Authorization header.
+AUTH_META_KEY = "io.brain/authorization"
 
 # A server address: a Streamable HTTP URL, a command to start over stdio, or (in tests) a
 # server object connected in-process.
@@ -69,17 +75,47 @@ class McpToolSource:
         self._stack = stack
         return specs
 
-    async def call(self, tool: str, arguments: Mapping[str, Any]) -> ToolOutput:
+    async def call(
+        self, tool: str, arguments: Mapping[str, Any], credentials: str | None = None
+    ) -> ToolOutput:
+        meta = _auth_meta(credentials)
+        if credentials and isinstance(self._target, str):
+            return await self._call_as_user(tool, arguments, credentials, meta)
         client = await self._session()
         try:
             result = await client.call_tool(
-                tool, dict(arguments), read_timeout_seconds=self._timeout
+                tool, dict(arguments), read_timeout_seconds=self._timeout, meta=meta
             )
         except Exception as exc:
             if _is_disconnect(exc):
                 self._mark_down()
                 self._broken.set()  # the supervisor reconnects; this call still fails
             raise
+        return ToolOutput(_text(result), bool(result.is_error))
+
+    async def _call_as_user(
+        self,
+        tool: str,
+        arguments: Mapping[str, Any],
+        credentials: str,
+        meta: RequestParamsMeta | None,
+    ) -> ToolOutput:
+        """Over HTTP, a call made for a user gets its own connection carrying the user's
+        token in the Authorization header, the way the server expects any client to.
+        The shared session (no user) is kept for discovery."""
+        assert isinstance(self._target, str)
+        headers = {"Authorization": f"Bearer {credentials}"}
+        async with (
+            httpx2.AsyncClient(headers=headers, timeout=self._timeout) as http,
+            Client(
+                streamable_http_client(self._target, http_client=http),
+                read_timeout_seconds=self._timeout,
+                client_info=Implementation(name="brain-template", version=__version__),
+            ) as client,
+        ):
+            result = await client.call_tool(
+                tool, dict(arguments), read_timeout_seconds=self._timeout, meta=meta
+            )
         return ToolOutput(_text(result), bool(result.is_error))
 
     async def close(self) -> None:
@@ -153,6 +189,14 @@ class McpToolSource:
             if cursor is None:
                 break
         return specs
+
+
+def _auth_meta(credentials: str | None) -> RequestParamsMeta | None:
+    if not credentials:
+        return None
+    meta: RequestParamsMeta = {}
+    meta[AUTH_META_KEY] = f"Bearer {credentials}"  # type: ignore[literal-required]
+    return meta
 
 
 def _is_disconnect(exc: Exception) -> bool:

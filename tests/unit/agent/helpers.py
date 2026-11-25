@@ -3,6 +3,7 @@
 from collections.abc import Collection, Sequence
 from pathlib import Path
 
+from core.access import AuditLog, Policy
 from core.agent import Agent, Budget, InMemoryRunStore
 from core.config import ModelSpec, ModelTier, Provider, load_pack
 from core.llm import Message, ModelGateway, Role, ToolCall, ToolResult, ToolSpec
@@ -24,12 +25,14 @@ class FakeTools:
         self.specs = (FIND, STOCK, CANCEL)
         self._failing = set(failing)
         self.ran: list[ToolCall] = []
+        self.credentials: list[str | None] = []
 
     def is_read_only(self, name: str) -> bool:
         return name in {"find_order", "check_stock"}
 
-    async def run(self, call: ToolCall) -> ToolResult:
+    async def run(self, call: ToolCall, credentials: str | None = None) -> ToolResult:
         self.ran.append(call)
+        self.credentials.append(credentials)
         if call.name in self._failing:
             return ToolResult(call.id, call.name, "service down", is_error=True)
         return ToolResult(call.id, call.name, f"{call.name} result")
@@ -45,6 +48,8 @@ def build(
     tools: FakeTools | None = None,
     budget: Budget | None = None,
     auto_approve: Collection[str] = (),
+    policy: Policy | None = None,
+    audit: AuditLog | None = None,
 ) -> tuple[Pipeline, FakeProvider, FakeTools, InMemoryTraceStore]:
     pack = load_pack(pack_dir)
     prompts = ChainedPromptStore([FilePromptStore(pack.prompts_dir), builtin_store()])
@@ -57,8 +62,9 @@ def build(
         _NoDocs(),
         prompts.get("rag_turn"),
         Tracer(store),
-        agent=Agent(tools, budget, auto_approve),
+        agent=Agent(tools, budget, auto_approve, policy, audit),
         runs=InMemoryRunStore(),
+        policy=policy,
     )
     return pipeline, provider, tools, store
 

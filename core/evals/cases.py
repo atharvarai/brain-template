@@ -72,6 +72,7 @@ class EvalCase(_Strict):
     tags: tuple[str, ...] = ()
     expect: Expectations
     approve: bool = True  # the decision given if the brain pauses for approval
+    user: str | None = None  # demo user handle to ask as (default: evals.default_user)
 
     @model_validator(mode="after")
     def _history_alternates(self) -> Self:

@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from core.access import load_dev_users
 from core.evals import (
     CheckKind,
     EvalCase,
@@ -104,9 +105,11 @@ def test_the_shipped_example_pack_cases_are_valid() -> None:
         for line in (root / name).read_text(encoding="utf-8").splitlines()
         if line.startswith("## ")
     }
+    users = load_dev_users(EDTECH_PACK / "seed" / "users.yaml")
     for loaded in cases:  # a typo in a document or section name could never pass
         for expected in (*loaded.expect.retrieves, *loaded.expect.cites):
             assert expected in (headings if "#" in expected else docs), (loaded.id, expected)
+        assert loaded.user is None or loaded.user in users, (loaded.id, loaded.user)
 
 
 def test_normalize_ignores_case_spacing_and_digit_grouping() -> None:

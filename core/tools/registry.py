@@ -29,7 +29,9 @@ class ToolExecutor(Protocol):
         """True if the tool's server declares that it changes nothing."""
         ...
 
-    async def run(self, call: ToolCall) -> ToolResult: ...
+    async def run(self, call: ToolCall, credentials: str | None = None) -> ToolResult:
+        """Run a call, passing the user's token on to the tool's server."""
+        ...
 
 
 class ToolRegistry:
@@ -102,14 +104,14 @@ class ToolRegistry:
     ) -> None:
         await self.close()
 
-    async def run(self, call: ToolCall) -> ToolResult:
+    async def run(self, call: ToolCall, credentials: str | None = None) -> ToolResult:
         source = self._routes.get(call.name)
         if source is None:
             known = ", ".join(sorted(self._routes)) or "none"
             return self._error(call, f"Unknown tool '{call.name}'. Available tools: {known}.")
         try:
             with anyio.fail_after(self._timeout):
-                output = await source.call(call.name, call.arguments)
+                output = await source.call(call.name, call.arguments, credentials)
         except TimeoutError:
             logger.warning("tool '%s' timed out after %ss", call.name, self._timeout)
             return self._error(call, f"The tool did not answer within {self._timeout:g} seconds.")

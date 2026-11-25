@@ -33,8 +33,13 @@ class ToolSource(Protocol):
         """Connect and discover the tools on offer."""
         ...
 
-    async def call(self, tool: str, arguments: Mapping[str, Any]) -> ToolOutput:
-        """Run one tool. Raises if the source cannot be reached; tool failures are outputs."""
+    async def call(
+        self, tool: str, arguments: Mapping[str, Any], credentials: str | None = None
+    ) -> ToolOutput:
+        """Run one tool as the user whose bearer token is ``credentials``.
+
+        Raises if the source cannot be reached; tool failures are outputs.
+        """
         ...
 
     async def close(self) -> None: ...

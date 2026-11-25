@@ -1,5 +1,6 @@
 """Builds the tool registry from a pack's ``tools`` section."""
 
+import os
 import sys
 from pathlib import Path
 
@@ -25,6 +26,6 @@ def _target(server: McpServerConfig, pack_root: Path) -> McpTarget:
     command, *args = server.command
     if command == "python":  # the brain's own interpreter, so the pack needs no set-up
         command = sys.executable
-    return StdioServerParameters(
-        command=command, args=args, env=dict(server.env) or None, cwd=pack_root
-    )
+    env = dict(server.env)
+    env.update({name: os.environ[name] for name in server.pass_env if name in os.environ})
+    return StdioServerParameters(command=command, args=args, env=env or None, cwd=pack_root)

@@ -6,13 +6,14 @@ Clone it, add one folder that describes your company (docs, tools, roles, prompt
 cases), and you get an assistant built from clearly separated AI layers: model, prompts,
 RAG, tools (MCP), agent, access control, guardrails, cache and router, observability and evals.
 
-**Status: early.** Milestones M0 to M6 are done: the service answers questions from a
+**Status: early.** Milestones M0 to M7 are done: the service answers questions from a
 company's documents with citations and from the company's own systems through MCP tools.
 An agent loop takes several steps within budgets, and actions that change data wait for the
-user's approval. Underneath are a vendor-neutral model layer with failover, versioned
-prompts and schema-validated structured output. Every request is traced, and each pack
-carries an eval set that gates changes. There is no access control yet (M7). See
-[docs/PLAN.md](docs/PLAN.md) for the design and the milestone list.
+user's approval. Every request carries the user's token: their roles decide which documents
+they can read and which tools they can call, and tools run as them. Underneath are a
+vendor-neutral model layer with failover, versioned prompts and schema-validated structured
+output. Every request is traced, actions are audited, and each pack carries an eval set that
+gates changes. See [docs/PLAN.md](docs/PLAN.md) for the design and the milestone list.
 
 ## How it is organised
 
@@ -219,6 +220,57 @@ and tool spans carry their step number, and the trace records events such as
 `approval_requested`, `approval_decided` and `budget_reached`. A resumed run gets its own
 trace, linked to the paused one.
 
+## Access
+
+With an `access` section in `brain.yaml`, every request needs a bearer token (a JWT from the
+company's backend). A missing or bad token gets a 401, and the refusal is audited.
+
+```yaml
+access:
+  jwt: {algorithm: HS256, secret_env: BRAIN_JWT_SECRET, issuer: skilvanta-backend,
+        audience: skilvanta-brain}        # or RS256 with public_key_file
+  policy: policy.yaml
+  dev_users: seed/users.yaml              # demo users for local tokens and evals
+```
+
+The pack's `policy.yaml` maps roles to readable labels and callable tools:
+
+```yaml
+roles:
+  learner: {read: [],                      tools: [get_my_enrollments, book_mentor_session, ...]}
+  mentor:  {read: [internal],              tools: [get_mentee_progress]}
+  admin:   {read: [internal, admin_only], tools: ["*"]}
+```
+
+Anything not granted is denied. Unlabelled documents are open to everyone. The rules are
+applied at three points:
+
+- **Retrieval:** the store returns only chunks whose every label the user may read. The
+  filter is part of the SQL query, so restricted text never leaves the store.
+- **Tools:** the model is shown only the tools the user's roles allow. Each call is checked
+  again before it runs, and a refused call is audited.
+- **The tool server:** tools run as the user. The token goes to the MCP server in the
+  `Authorization` header over HTTP, or in the request `_meta` over stdio (development
+  only). The server checks it and applies its own rules. In Skilvanta's demo, for example,
+  a mentor sees only their own mentees, even though the brain's policy lets mentors call
+  the tool.
+
+A paused run can be decided only by the user who started it; to anyone else it looks like
+no run at all. Feedback on an answer is likewise accepted only from the user who got it.
+
+The audit log (`make audit`) records every tool call, every refused call, every approval
+decision and every rejected token, each with the user and their roles. It is kept apart
+from traces.
+
+Without an `access` section the brain is open: every request is anonymous, sees unlabelled
+documents only, and may call every tool. A warning is logged at start-up.
+
+```bash
+make token as=riya       # sign a token for a demo user (dev secret from the Makefile)
+make tools tool=get_course_progress args='{"course": "DSA"}' as=riya
+make audit
+```
+
 ## Observability
 
 Every request (chat, title, eval, judge) writes one trace:
@@ -267,24 +319,25 @@ to have run, and `{"calls": []}` means no tool may run. `asks_approval` works th
 for actions that paused for approval. A case's `"approve": true` or `false` is the decision
 the eval gives when the brain asks.
 
-Skilvanta's 38 cases cover:
+Each case runs as a demo user with a real signed token (`evals.default_user`, or the case's
+`"user"`), so retrieval filters, tool policy and the tool server's own checks are all
+exercised. Retrieval-only evals respect the user's labels too.
+
+Skilvanta's 46 cases cover:
 
 - facts and policies, including multi-step reasoning
 - leaks of restricted documents, and prompt injection
 - follow-up questions, and a Hinglish question
 - tool use: questions that need a tool, a tool error, and a question that must not use tools
 - agent runs: multi-step lookups, a booking approved and one declined, a refund request
+- access by role: what a learner, mentor, support agent and admin can each read and do, and
+  a mentor refused another mentor's learner by the tool server
 
-The latest run through the `claude_code` profile passed 37 of 38 in about 80 s. The same
-traffic would cost about $0.38 at API list prices.
+The latest run through the `claude_code` profile passed 45 of 46 in about 90 s. The same
+traffic would cost about $0.44 at API list prices.
 
-Two cases are known to fail:
-
-- **The Hinglish case** fails every run: the English-only reranker drops the section that
-  holds the answer.
-- **`refund-day-5-one-class`** fails about half the time, since the refund tool arrived.
-  The model now offers to file the request, and in about half of the runs it leaves out
-  the refund amount.
+The one failing case is the Hinglish one: the English-only reranker drops the section that
+holds the answer.
 
 ## Quick start
 
@@ -296,25 +349,26 @@ make check      # ruff, mypy, import-linter, pytest
 make ingest     # build the document index (downloads a 67 MB embedding model once)
 make run        # serves examples/edtech on http://127.0.0.1:8000
 curl http://127.0.0.1:8000/healthz
+TOKEN=$(make -s token as=riya)   # Skilvanta has access control on: requests need a token
 
 # one JSON answer
-curl http://127.0.0.1:8000/v1/chat -H 'content-type: application/json' \
+curl http://127.0.0.1:8000/v1/chat -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
   -d '{"stream": false, "messages": [{"role": "user", "content": "How do refunds work?"}]}'
 
 # a question that needs a tool (the demo server acts as one synthetic learner)
-curl http://127.0.0.1:8000/v1/chat -H 'content-type: application/json' \
+curl http://127.0.0.1:8000/v1/chat -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
   -d '{"stream": false, "messages": [{"role": "user", "content": "Which courses am I enrolled in?"}]}'
 
 # an action: pauses for approval (see "Agent" above for the decisions call)
-curl http://127.0.0.1:8000/v1/chat -H 'content-type: application/json' \
+curl http://127.0.0.1:8000/v1/chat -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
   -d '{"stream": false, "messages": [{"role": "user", "content": "Book my mentor slot on 29 November"}]}'
 
 # streamed answer (Server-Sent Events: delta, tool, approval..., then done)
-curl -N http://127.0.0.1:8000/v1/chat -H 'content-type: application/json' \
+curl -N http://127.0.0.1:8000/v1/chat -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
   -d '{"messages": [{"role": "user", "content": "Who are you?"}]}'
 
 # structured output: a title for a conversation
-curl http://127.0.0.1:8000/v1/title -H 'content-type: application/json' \
+curl http://127.0.0.1:8000/v1/title -H "Authorization: Bearer $TOKEN" -H 'content-type: application/json' \
   -d '{"messages": [{"role": "user", "content": "How do refunds work?"}]}'
 ```
 

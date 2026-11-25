@@ -5,6 +5,8 @@
 - ``eval``    run the pack's eval cases and fail below the pass-rate threshold
 - ``traces``  list recent traces with a summary, or show one trace in full
 - ``tools``   list the tools discovered from the pack's MCP servers, or call one
+- ``token``   sign a token for one of the pack's demo users (development only)
+- ``audit``   recent audit log entries: tool calls, refusals, approvals, bad tokens
 """
 
 import argparse
@@ -14,7 +16,8 @@ import sys
 import uuid
 from collections.abc import Callable
 
-from core.api.app import build_context
+from core.access import AccessConfigError, DevTokenIssuer, SqliteAuditLog
+from core.api.app import AUDIT_FILE, build_context
 from core.api.context import AppContext
 from core.config import PackError, Settings, load_pack
 from core.evals import (
@@ -24,6 +27,7 @@ from core.evals import (
     EvalReport,
     EvalRunner,
     EvalTarget,
+    EvalUsers,
     LLMJudge,
     ReportArchive,
     RetrievalTarget,
@@ -73,6 +77,14 @@ def _parser() -> argparse.ArgumentParser:
     )
     tools.add_argument("--call", default=None, metavar="NAME", help="run this tool once")
     tools.add_argument("--args", default="{}", help="arguments for --call, as a JSON object")
+    tools.add_argument("--as", dest="user", default=None, help="demo user to call as")
+
+    token = commands.add_parser("token", help="sign a token for a demo user (development only)")
+    token.add_argument("user", help="handle from the pack's dev_users file")
+    token.add_argument("--ttl", type=int, default=3600, help="seconds until it expires")
+
+    audit = commands.add_parser("audit", help="recent audit log entries")
+    audit.add_argument("-n", type=int, default=30)
     return parser
 
 
@@ -110,15 +122,16 @@ def _search(args: argparse.Namespace, settings: Settings) -> int:
 
 
 def _eval_target(context: AppContext, retrieval_only: bool) -> tuple[EvalTarget, LLMJudge | None]:
+    users = EvalUsers(context.pack, context.access.authenticator)
     if retrieval_only:
-        return RetrievalTarget(context.pipeline), None
+        return RetrievalTarget(context.pipeline, users.caller), None
     config = context.pack.config
     judge = LLMJudge(
         context.gateway.for_tier(config.evals.judge_tier),
         context.prompts.get(JUDGE_PROMPT),
         context.tracer,
     )
-    return AnswerTarget(context.pipeline, PriceBook(config.models.prices)), judge
+    return AnswerTarget(context.pipeline, PriceBook(config.models.prices), users.caller), judge
 
 
 def _eval(args: argparse.Namespace, settings: Settings) -> int:
@@ -203,6 +216,13 @@ def _tools(args: argparse.Namespace, settings: Settings) -> int:
         print("--args must be a JSON object")
         return 1
 
+    credentials = None
+    if args.user:
+        if pack.config.access is None:
+            print("--as needs an 'access' section in brain.yaml")
+            return 1
+        credentials = DevTokenIssuer(pack.config.access, pack.root).issue(args.user)
+
     async def run() -> int:
         async with build_tools(pack.config.tools, pack.root) as registry:
             for server in registry.unavailable:
@@ -214,11 +234,36 @@ def _tools(args: argparse.Namespace, settings: Settings) -> int:
                     print(f"    arguments: {json.dumps(dict(spec.input_schema))}")
                 return 0 if registry.specs else 1
             call = ToolCall(f"cli_{uuid.uuid4().hex[:8]}", args.call, arguments)
-            result = await registry.run(call)
+            result = await registry.run(call, credentials)
             print(("ERROR: " if result.is_error else "") + result.content)
             return 1 if result.is_error else 0
 
     return asyncio.run(run())
+
+
+def _token(args: argparse.Namespace, settings: Settings) -> int:
+    pack = load_pack(settings.pack)
+    if pack.config.access is None:
+        print(f"{pack.root}: brain.yaml has no 'access' section, so no tokens are needed")
+        return 1
+    print(DevTokenIssuer(pack.config.access, pack.root).issue(args.user, args.ttl))
+    return 0
+
+
+def _audit(args: argparse.Namespace, settings: Settings) -> int:
+    pack = load_pack(settings.pack)
+    log = SqliteAuditLog(pack.state_dir(settings.data_dir) / AUDIT_FILE)
+    entries = log.recent(args.n)
+    if not entries:
+        print("the audit log is empty")
+    for e in reversed(entries):
+        roles = ",".join(e.roles) or "-"
+        detail = json.dumps(dict(e.detail), ensure_ascii=False) if e.detail else ""
+        print(
+            f"{e.at.astimezone():%Y-%m-%d %H:%M:%S}  {e.action.value:<11} {e.user_id:<9} "
+            f"{roles:<14} {e.target:<22} {e.outcome:<8} {detail}"[:220].rstrip()
+        )
+    return 0
 
 
 COMMANDS: dict[str, Command] = {
@@ -227,6 +272,8 @@ COMMANDS: dict[str, Command] = {
     "eval": _eval,
     "traces": _traces,
     "tools": _tools,
+    "token": _token,
+    "audit": _audit,
 }
 
 
@@ -234,7 +281,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         return COMMANDS[args.command](args, Settings())
-    except (PackError, RagError, EvalError, PromptError, ToolError) as exc:
+    except (PackError, RagError, EvalError, PromptError, ToolError, AccessConfigError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 

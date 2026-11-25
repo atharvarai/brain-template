@@ -26,6 +26,7 @@ from core.evals.targets import (
     EvalTarget,
     RetrievalTarget,
 )
+from core.evals.users import EvalUsers
 
 __all__ = [
     "JUDGE_PROMPT",
@@ -47,6 +48,7 @@ __all__ = [
     "EvalReport",
     "EvalRunner",
     "EvalTarget",
+    "EvalUsers",
     "Excludes",
     "Expectations",
     "Judge",

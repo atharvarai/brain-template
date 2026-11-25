@@ -2,7 +2,7 @@
 change data. Paused runs are stored and resumed by a later request."""
 
 from core.agent.errors import DecisionError, RunClosedError, RunNotFoundError
-from core.agent.loop import DECLINED, Agent, validate_decisions
+from core.agent.loop import DECLINED, DENIED, Agent, validate_decisions
 from core.agent.runs import InMemoryRunStore, PausedRun, RunStore, SqliteRunStore
 from core.agent.types import (
     AgentEvent,
@@ -17,6 +17,7 @@ from core.agent.types import (
 
 __all__ = [
     "DECLINED",
+    "DENIED",
     "Agent",
     "AgentEvent",
     "ApprovalRequired",
