@@ -16,6 +16,19 @@ rag:
   # retrieval in `make eval-retrieval` from 21/23 to 23/23 (see docs/PLAN.md, M4).
   reranker: {kind: fastembed, model: jinaai/jina-reranker-v1-tiny-en, candidates: 20}
 
+# Tools come from MCP servers and are discovered at start-up; nothing here names a tool.
+# The demo server (mcp_server/server.py) stands in for Skilvanta's backend. Locally the brain
+# starts it over stdio; in production point at the server the backend runs, for example
+#   skilvanta: {transport: http, url: "http://localhost:8792/mcp"}
+tools:
+  servers:
+    skilvanta:
+      transport: stdio
+      command: [python, mcp_server/server.py]
+  timeout_seconds: 10
+  max_result_chars: 4000
+  max_calls_per_turn: 4
+
 # Each profile maps every tier to an ordered fallback chain.
 # Pick one with `active`, or override per process with BRAIN_MODEL_PROFILE.
 models:

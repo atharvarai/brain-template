@@ -40,10 +40,12 @@ class Expectations(_Strict):
     retrieves: tuple[str, ...] = ()
     cites: tuple[str, ...] = ()  # same form: the answer must cite these
     rubric: str | None = None  # graded by a judge model
+    # Tools that must have been called. An empty list means no tool may be called.
+    calls: tuple[str, ...] | None = None
 
     @model_validator(mode="after")
     def _not_empty(self) -> Self:
-        if not any(
+        if self.calls is None and not any(
             (
                 self.contains_all,
                 self.contains_any,

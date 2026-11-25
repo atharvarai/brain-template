@@ -29,6 +29,7 @@ class EvalOutcome:
     input_tokens: int = 0
     output_tokens: int = 0
     cost_usd: float | None = None
+    tools_called: tuple[str, ...] = ()  # in the order they ran
 
 
 class EvalTarget(Protocol):
@@ -57,6 +58,7 @@ class AnswerTarget:
             input_tokens=usage.input_tokens,
             output_tokens=usage.output_tokens,
             cost_usd=self._prices.cost(spec.model, usage.input_tokens, usage.output_tokens),
+            tools_called=tuple(activity.name for activity in answer.tools),
         )
 
 

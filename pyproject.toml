@@ -9,6 +9,7 @@ dependencies = [
     "fastapi>=0.115",
     "fastembed>=0.9.1",
     "httpx2>=2.16.2",
+    "mcp>=2.3,<3",
     "numpy>=2.5.5",
     "pydantic>=2.9",
     "pydantic-settings>=2.6",

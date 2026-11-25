@@ -32,6 +32,7 @@ def report_to_dict(report: EvalReport) -> dict[str, Any]:
                 "latency_ms": r.outcome.latency_ms if r.outcome else None,
                 "answer": r.outcome.answer if r.outcome else None,
                 "retrieved": list(r.outcome.retrieved) if r.outcome else [],
+                "tools_called": list(r.outcome.tools_called) if r.outcome else [],
             }
             for r in report.results
         ],
@@ -58,8 +59,12 @@ class ReportArchive:
 
 @dataclass(frozen=True, slots=True)
 class Comparison:
-    previous_rate: float
+    """This run against the previous one, over the cases both ran (filters can differ)."""
+
     previous_at: str
+    shared: int  # cases in both runs
+    previous_rate: float  # pass rate on the shared cases, then and now
+    current_rate: float
     regressions: tuple[str, ...]  # passed last time, fail now
     fixes: tuple[str, ...]  # failed last time, pass now
 
@@ -68,9 +73,15 @@ def compare(report: EvalReport, previous: dict[str, Any]) -> Comparison:
     before = {case["id"]: case["passed"] for case in previous["cases"]}
     now = {result.case_id: result.passed for result in report.results}
     shared = before.keys() & now.keys()
+
+    def rate(results: dict[str, bool]) -> float:
+        return sum(results[c] for c in shared) / len(shared) if shared else 0.0
+
     return Comparison(
-        previous_rate=previous["pass_rate"],
         previous_at=previous["started_at"][:19].replace("T", " "),
+        shared=len(shared),
+        previous_rate=rate(before),
+        current_rate=rate(now),
         regressions=tuple(sorted(c for c in shared if before[c] and not now[c])),
         fixes=tuple(sorted(c for c in shared if not before[c] and now[c])),
     )
@@ -116,11 +127,12 @@ def render(report: EvalReport, threshold: float, comparison: Comparison | None =
     lines.append(
         f"Latency p50 {p50:.1f}s, p95 {p95:.1f}s;{usage} wall time {report.duration_ms / 1000:.1f}s"
     )
-    if comparison:
-        delta = (report.pass_rate - comparison.previous_rate) * 100
+    if comparison and comparison.shared:
+        delta = (comparison.current_rate - comparison.previous_rate) * 100
         lines.append(
-            f"Previous run ({comparison.previous_at}): {comparison.previous_rate:.1%}, "
-            f"change {delta:+.1f} points"
+            f"Previous run ({comparison.previous_at}), on the {comparison.shared} cases both ran: "
+            f"{comparison.previous_rate:.1%} then, {comparison.current_rate:.1%} now "
+            f"({delta:+.1f} points)"
         )
         if comparison.regressions:
             lines.append(f"  regressions: {', '.join(comparison.regressions)}")

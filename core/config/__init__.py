@@ -6,12 +6,15 @@ from core.config.enums import (
     Provider,
     RerankerKind,
     StopwordList,
+    ToolTransport,
 )
 from core.config.pack import DomainPack, PackError, load_pack
 from core.config.schema import (
     BrainConfig,
     EmbedderConfig,
     EvalsConfig,
+    HttpServerConfig,
+    McpServerConfig,
     ModelsConfig,
     ModelSpec,
     ObservabilityConfig,
@@ -19,6 +22,8 @@ from core.config.schema import (
     PromptsConfig,
     RagConfig,
     RerankerConfig,
+    StdioServerConfig,
+    ToolsConfig,
 )
 from core.config.settings import Settings
 
@@ -28,6 +33,8 @@ __all__ = [
     "EmbedderConfig",
     "EmbedderKind",
     "EvalsConfig",
+    "HttpServerConfig",
+    "McpServerConfig",
     "ModelSpec",
     "ModelTier",
     "ModelsConfig",
@@ -40,6 +47,9 @@ __all__ = [
     "RerankerConfig",
     "RerankerKind",
     "Settings",
+    "StdioServerConfig",
     "StopwordList",
+    "ToolTransport",
+    "ToolsConfig",
     "load_pack",
 ]

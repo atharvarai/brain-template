@@ -11,6 +11,7 @@ from core.observability import FeedbackSink, Tracer, TraceReader
 from core.pipeline import Pipeline
 from core.prompts import PromptStore
 from core.tasks.title import TitleGenerator
+from core.tools import ToolRegistry
 
 
 @dataclass(frozen=True)
@@ -26,6 +27,7 @@ class AppContext:
     feedback: FeedbackSink
     pipeline: Pipeline
     title_generator: TitleGenerator
+    tools: ToolRegistry  # connect with ``async with context.tools`` before serving
 
 
 def get_context(request: Request) -> AppContext:

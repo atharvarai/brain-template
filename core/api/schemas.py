@@ -5,6 +5,7 @@ from typing import Self
 from pydantic import BaseModel, Field
 
 from core.llm import Completion, Message, Role
+from core.pipeline import ToolActivity
 from core.prompts import PromptRef
 from core.rag import Source
 
@@ -77,3 +78,15 @@ class CallMetadata(BaseModel):
             latency_ms=completion.latency_ms,
             prompts=[PromptRefOut.from_ref(ref) for ref in prompts],
         )
+
+
+class ToolActivityOut(BaseModel):
+    """A tool the brain ran while answering. Arguments and results are not echoed back."""
+
+    name: str
+    ok: bool
+    latency_ms: int
+
+    @classmethod
+    def from_activity(cls, activity: ToolActivity) -> Self:
+        return cls(name=activity.name, ok=activity.ok, latency_ms=activity.latency_ms)

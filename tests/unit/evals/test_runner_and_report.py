@@ -133,6 +133,9 @@ async def test_reports_are_archived_and_compared_with_the_previous_run(tmp_path:
     comparison = compare(second, archive.latest("answer") or {})
     assert comparison.regressions == ("fee", "judged")
     assert comparison.fixes == ("crash",)
+    # Rates compare only the cases both runs had, so a filtered run is not misread.
+    assert comparison.shared == 4
+    assert (comparison.previous_rate, comparison.current_rate) == (0.75, 0.5)
 
     text = render(second, threshold=0.8, comparison=comparison)
     assert "FAIL  fee" in text
@@ -140,4 +143,5 @@ async def test_reports_are_archived_and_compared_with_the_previous_run(tmp_path:
     assert "BELOW THRESHOLD" in text
     assert "regressions: fee, judged" in text
     assert "fixed: crash" in text
+    assert "on the 4 cases both ran: 75.0% then, 50.0% now (-25.0 points)" in text
     assert "$0.0030 at list price" in text

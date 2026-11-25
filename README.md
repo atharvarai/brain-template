@@ -6,11 +6,12 @@ Clone it, add one folder that describes your company (docs, tools, roles, prompt
 cases), and you get an assistant built from clearly separated AI layers: model, prompts,
 RAG, tools (MCP), agent, access control, guardrails, cache and router, observability and evals.
 
-**Status: early.** Milestones M0 to M4 are done: the service answers questions from a
-company's documents with citations, through a vendor-neutral model layer with failover,
-versioned prompts and schema-validated structured output. Every request is traced, and each
-pack carries an eval set that gates changes. There is no tool use or access control yet.
-See [docs/PLAN.md](docs/PLAN.md) for the design and the milestone list.
+**Status: early.** Milestones M0 to M5 are done: the service answers questions from a
+company's documents with citations and from the company's own systems through MCP tools,
+using a vendor-neutral model layer with failover, versioned prompts and schema-validated
+structured output. Every request is traced, and each pack carries an eval set that gates
+changes. Tool use is one round per question (the multi-step agent comes next), and there is
+no access control yet. See [docs/PLAN.md](docs/PLAN.md) for the design and the milestone list.
 
 ## How it is organised
 
@@ -117,6 +118,62 @@ development and small document sets. A production vector database adapter is not
 The default embedding and reranking models are English-only; set multilingual models in
 `brain.yaml` for other languages (for example `BAAI/bge-reranker-v2-m3`, which is much slower).
 
+## Tools (MCP)
+
+Tools come only from MCP servers listed in `brain.yaml`. The brain discovers their names,
+descriptions and argument schemas at start-up, so `core/` never names a tool and the same
+code works for any company's server.
+
+```yaml
+tools:
+  servers:
+    skilvanta: {transport: stdio, command: [python, mcp_server/server.py]}  # local dev
+    # skilvanta: {transport: http, url: "http://backend.internal:8792/mcp"}  # production
+  timeout_seconds: 10
+  max_result_chars: 4000
+  max_calls_per_turn: 4
+```
+
+For each question the model sees the documents and the tools. If it asks for tools, the
+brain runs the calls (concurrently), sends back the results and asks once more for the
+final answer, with no further calls allowed. Looping over several rounds, with budgets and
+approval for actions that change data, is the agent layer's job (M6).
+
+Failures never end the request. Each one goes back to the model as an error result, and the
+model tells the user it could not get the data:
+
+- a tool reports an error (for example "not enrolled in that course")
+- arguments fail the tool's schema, or the model names a tool that does not exist
+- a call takes longer than `timeout_seconds`
+- the server cannot be reached. Internal details stay in the log, and the brain reconnects
+  in the background with growing pauses, so a restarted server is picked up again.
+
+A server that is down at start-up is skipped. `/healthz` then reports `degraded` and names
+it, and the brain answers from documents alone. Results longer than `max_result_chars` are
+cut, with a note saying so. Streamed chats send a `tool` event for each tool run, and the
+final `done` event lists them.
+
+Skilvanta ships a demo MCP server (`examples/edtech/mcp_server/server.py`) with synthetic
+learner data and three read-only tools: enrollments, course progress, and mentor slots.
+
+```bash
+make tools                                                # list discovered tools
+make tools tool=get_course_progress args='{"course": "DSA"}'  # run one
+make mcp-server                                           # serve it over HTTP on :8792
+```
+
+Each adapter maps tool calling onto its vendor's native feature: Anthropic `tool_use`
+blocks, OpenAI function calls, Ollama `tool_calls`. The Claude Code CLI runs tools in its
+own loop, which would take control away from the brain, so that adapter emulates tool
+calling instead. It describes the tools in the system prompt and constrains the reply to
+JSON holding either tool calls or an answer. Two costs, measured on the Skilvanta evals:
+
+- A request that offers tools cannot stream on this adapter.
+- Input tokens per question roughly double, because the CLI adds an internal turn for
+  schema-constrained replies.
+
+Native adapters only add the tool definitions.
+
 ## Observability
 
 Every request (chat, title, eval, judge) writes one trace:
@@ -160,11 +217,19 @@ Both print per-case results, pass rate by check and tag, latency and cost. They 
 compare with the previous run, listing regressions and fixes, and exit non-zero below
 `evals.min_pass_rate`.
 
-Skilvanta's 27 cases cover facts, policies, multi-step reasoning, leaks of restricted
-documents, prompt injection, follow-up questions and a Hinglish question. The latest run
-through the `claude_code` profile passed 26 of 27 in about 50 s, and the same traffic would
-cost about $0.14 at API list prices. The failing case is the Hinglish one: the English-only
-reranker drops the section that holds the answer.
+A `calls` expectation checks tool use: `{"calls": ["get_my_enrollments"]}` needs that tool
+to have run, and `{"calls": []}` means no tool may run.
+
+Skilvanta's 33 cases cover:
+
+- facts and policies, including multi-step reasoning
+- leaks of restricted documents, and prompt injection
+- follow-up questions, and a Hinglish question
+- tool use: questions that need a tool, a tool error, and a question that must not use tools
+
+The latest run through the `claude_code` profile passed 32 of 33 in about 65 s. The same
+traffic would cost about $0.31 at API list prices. The failing case is the Hinglish one: the
+English-only reranker drops the section that holds the answer.
 
 ## Quick start
 
@@ -181,7 +246,11 @@ curl http://127.0.0.1:8000/healthz
 curl http://127.0.0.1:8000/v1/chat -H 'content-type: application/json' \
   -d '{"stream": false, "messages": [{"role": "user", "content": "How do refunds work?"}]}'
 
-# streamed answer (Server-Sent Events: delta..., then done)
+# a question that needs a tool (the demo server acts as one synthetic learner)
+curl http://127.0.0.1:8000/v1/chat -H 'content-type: application/json' \
+  -d '{"stream": false, "messages": [{"role": "user", "content": "Which courses am I enrolled in?"}]}'
+
+# streamed answer (Server-Sent Events: tool..., delta..., then done)
 curl -N http://127.0.0.1:8000/v1/chat -H 'content-type: application/json' \
   -d '{"messages": [{"role": "user", "content": "Who are you?"}]}'
 

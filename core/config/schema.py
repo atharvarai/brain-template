@@ -3,11 +3,18 @@
 Kept deliberately small: a setting is added here only when a milestone needs it.
 """
 
-from typing import Self
+from typing import Annotated, Literal, Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from core.config.enums import EmbedderKind, ModelTier, Provider, RerankerKind, StopwordList
+from core.config.enums import (
+    EmbedderKind,
+    ModelTier,
+    Provider,
+    RerankerKind,
+    StopwordList,
+    ToolTransport,
+)
 
 
 class _Strict(BaseModel):
@@ -101,6 +108,35 @@ class RagConfig(_Strict):
     reranker: RerankerConfig | None = None  # off unless the pack's evals show it helps
 
 
+class StdioServerConfig(_Strict):
+    """An MCP server the brain starts itself. ``python`` as the command means the brain's own
+    interpreter; the working directory is the pack root."""
+
+    transport: Literal[ToolTransport.STDIO]
+    command: tuple[str, ...] = Field(min_length=1)
+    env: dict[str, str] = Field(default_factory=dict)
+
+
+class HttpServerConfig(_Strict):
+    """An MCP server reached over Streamable HTTP, usually run by the company's backend."""
+
+    transport: Literal[ToolTransport.HTTP]
+    url: str = Field(pattern=r"^https?://")
+
+
+McpServerConfig = Annotated[StdioServerConfig | HttpServerConfig, Field(discriminator="transport")]
+
+
+class ToolsConfig(_Strict):
+    """Tools come only from MCP servers: the core never names a tool. Each server's tools are
+    discovered at start-up."""
+
+    servers: dict[str, McpServerConfig] = Field(default_factory=dict)  # keyed by a short name
+    timeout_seconds: float = Field(default=15, gt=0)  # per tool call
+    max_result_chars: int = Field(default=4000, ge=100)  # longer results are cut, with a note
+    max_calls_per_turn: int = Field(default=4, ge=1, le=16)
+
+
 class ObservabilityConfig(_Strict):
     """What each request's trace keeps. Traces always hold timings, tokens, cost, model,
     prompt versions and document ids; the user's text and the answer only if allowed here."""
@@ -125,5 +161,6 @@ class BrainConfig(_Strict):
     models: ModelsConfig
     prompts: PromptsConfig = Field(default_factory=PromptsConfig)
     rag: RagConfig | None = None
+    tools: ToolsConfig = Field(default_factory=ToolsConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
     evals: EvalsConfig = Field(default_factory=EvalsConfig)

@@ -40,3 +40,10 @@ class ModelTier(StrEnum):
     SMALL = "small"  # classify, route, extract
     MID = "mid"  # everyday answers
     LARGE = "large"  # multi-step reasoning, agent work
+
+
+class ToolTransport(StrEnum):
+    """How the brain reaches an MCP server."""
+
+    STDIO = "stdio"  # the brain starts the server as a child process: local development
+    HTTP = "http"  # Streamable HTTP to a server the company runs: production

@@ -129,6 +129,21 @@ class Rubric:
         return CheckResult(self.name, verdict.passed, verdict.reason)
 
 
+@dataclass(frozen=True, slots=True)
+class Calls:
+    tools: tuple[str, ...]  # empty: the answer must not call any tool
+    name: str = "calls"
+    kind: CheckKind = CheckKind.ANSWER
+
+    async def evaluate(self, case: EvalCase, outcome: EvalOutcome) -> CheckResult:
+        called = outcome.tools_called
+        if not self.tools:
+            return CheckResult(self.name, not called, f"called {list(called)}" if called else "")
+        missing = [tool for tool in self.tools if tool not in called]
+        detail = f"did not call {missing} (called {list(called)})" if missing else ""
+        return CheckResult(self.name, not missing, detail)
+
+
 def build_checks(expect: Expectations, judge: Judge | None) -> list[Check]:
     """Factory: one check per expectation present."""
     checks: list[Check] = []
@@ -142,6 +157,8 @@ def build_checks(expect: Expectations, judge: Judge | None) -> list[Check]:
         checks.append(Excludes(expect.excludes))
     if expect.cites:
         checks.append(Cites(expect.cites))
+    if expect.calls is not None:
+        checks.append(Calls(expect.calls))
     if expect.rubric:
         checks.append(Rubric(expect.rubric, judge))
     return checks

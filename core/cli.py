@@ -4,12 +4,14 @@
 - ``search``  show what retrieval returns for a query
 - ``eval``    run the pack's eval cases and fail below the pass-rate threshold
 - ``traces``  list recent traces with a summary, or show one trace in full
+- ``tools``   list the tools discovered from the pack's MCP servers, or call one
 """
 
 import argparse
 import asyncio
 import json
 import sys
+import uuid
 from collections.abc import Callable
 
 from core.api.app import build_context
@@ -19,6 +21,7 @@ from core.evals import (
     JUDGE_PROMPT,
     AnswerTarget,
     EvalError,
+    EvalReport,
     EvalRunner,
     EvalTarget,
     LLMJudge,
@@ -28,10 +31,11 @@ from core.evals import (
     load_cases,
     render,
 )
-from core.llm import default_factory
+from core.llm import ToolCall, default_factory
 from core.observability import PriceBook, summarize, trace_to_dict
 from core.prompts import PromptError
 from core.rag import RagError, build_rag
+from core.tools import ToolError, build_tools
 
 Command = Callable[[argparse.Namespace, Settings], int]
 
@@ -63,6 +67,10 @@ def _parser() -> argparse.ArgumentParser:
     traces.add_argument("-n", type=int, default=20, help="how many traces")
     traces.add_argument("--operation", default=None, help="only chat, title, eval, judge...")
     traces.add_argument("--id", default=None, help="print one trace in full, as JSON")
+
+    tools = commands.add_parser("tools", help="list discovered tools, or call one")
+    tools.add_argument("--call", default=None, metavar="NAME", help="run this tool once")
+    tools.add_argument("--args", default="{}", help="arguments for --call, as a JSON object")
     return parser
 
 
@@ -125,7 +133,14 @@ def _eval(args: argparse.Namespace, settings: Settings) -> int:
 
     target, judge = _eval_target(context, args.retrieval)
     runner = EvalRunner(target, judge, config.name, context.model_profile, config.evals.concurrency)
-    report = asyncio.run(runner.run(cases))
+
+    async def run() -> EvalReport:
+        if args.retrieval:  # retrieval needs no tools: CI need not start any server
+            return await runner.run(cases)
+        async with context.tools:
+            return await runner.run(cases)
+
+    report = asyncio.run(run())
 
     archive = ReportArchive(context.pack.state_dir(settings.data_dir) / "evals")
     previous = archive.latest(report.mode.value)
@@ -172,11 +187,43 @@ def _traces(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+def _tools(args: argparse.Namespace, settings: Settings) -> int:
+    pack = load_pack(settings.pack)
+    if not pack.config.tools.servers:
+        print(f"{pack.root}: brain.yaml configures no tool servers")
+        return 1
+    try:
+        arguments = json.loads(args.args)
+    except json.JSONDecodeError as exc:
+        print(f"--args is not valid JSON: {exc}")
+        return 1
+    if not isinstance(arguments, dict):
+        print("--args must be a JSON object")
+        return 1
+
+    async def run() -> int:
+        async with build_tools(pack.config.tools, pack.root) as registry:
+            for server in registry.unavailable:
+                print(f"server '{server}' could not be reached")
+            if args.call is None:
+                for spec in registry.specs:
+                    print(f"{spec.name}: {spec.description}")
+                    print(f"    arguments: {json.dumps(dict(spec.input_schema))}")
+                return 0 if registry.specs else 1
+            call = ToolCall(f"cli_{uuid.uuid4().hex[:8]}", args.call, arguments)
+            result = await registry.run(call)
+            print(("ERROR: " if result.is_error else "") + result.content)
+            return 1 if result.is_error else 0
+
+    return asyncio.run(run())
+
+
 COMMANDS: dict[str, Command] = {
     "ingest": _ingest,
     "search": _search,
     "eval": _eval,
     "traces": _traces,
+    "tools": _tools,
 }
 
 
@@ -184,7 +231,7 @@ def main(argv: list[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         return COMMANDS[args.command](args, Settings())
-    except (PackError, RagError, EvalError, PromptError) as exc:
+    except (PackError, RagError, EvalError, PromptError, ToolError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
 

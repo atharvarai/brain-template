@@ -1,6 +1,8 @@
 """Application factory: the composition root where the layers are wired together."""
 
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
@@ -28,6 +30,7 @@ from core.pipeline import Pipeline
 from core.prompts import ChainedPromptStore, FilePromptStore, build_system_prompt, builtin_store
 from core.rag import NullRetriever, Retriever, build_rag
 from core.tasks.title import TITLE_PROMPT, TitleGenerator
+from core.tools import build_tools
 
 RAG_TURN_PROMPT = "rag_turn"
 
@@ -66,6 +69,7 @@ def build_context(settings: Settings, provider_factory: ProviderFactory) -> AppC
         retriever = rag.retriever
         if rag.store.count() == 0:
             logger.warning("the document index is empty: run `make ingest` to build it")
+    tools = build_tools(pack.config.tools, pack.root)
 
     return AppContext(
         pack=pack,
@@ -82,10 +86,13 @@ def build_context(settings: Settings, provider_factory: ProviderFactory) -> AppC
             turn_prompt=prompts.get(RAG_TURN_PROMPT),
             tracer=tracer,
             top_k=rag.top_k if rag else 1,
+            tools=tools,
+            max_tool_calls=pack.config.tools.max_calls_per_turn,
         ),
         title_generator=TitleGenerator(
             gateway.for_tier(ModelTier.SMALL), prompts.get(TITLE_PROMPT), tracer
         ),
+        tools=tools,
     )
 
 
@@ -127,7 +134,14 @@ def create_app(
     """
     _configure_logging()
     context = build_context(settings or Settings(), provider_factory or default_factory())
-    app = FastAPI(title=f"{context.pack.config.name} Brain", version=__version__)
+
+    @asynccontextmanager
+    async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+        # Tool servers are connected for the life of the process and discovered once.
+        async with context.tools:
+            yield
+
+    app = FastAPI(title=f"{context.pack.config.name} Brain", version=__version__, lifespan=lifespan)
     app.state.context = context
     app.include_router(health.router)
     app.include_router(chat.router)

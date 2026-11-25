@@ -43,7 +43,7 @@ def test_json_answer_carries_text_and_metadata(pack_dir: Path) -> None:
     assert body["stop_reason"] == "end"
     assert body["usage"]["output_tokens"] > 0
     names = [(p["name"], p["version"]) for p in body["prompts"]]
-    assert names == [("system", 2), ("persona", 1), ("rag_turn", 1)]
+    assert names == [("system", 3), ("persona", 1), ("rag_turn", 1)]
     assert all(len(p["checksum"]) == 12 for p in body["prompts"])
 
 

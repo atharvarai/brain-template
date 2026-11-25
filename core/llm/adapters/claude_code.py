@@ -3,6 +3,12 @@
 Lets someone with a Claude Code subscription run the brain with no API key. It is meant
 for development: the CLI takes one prompt per call, so earlier turns are folded into that
 prompt, and ``max_tokens`` cannot be enforced.
+
+Tool calling is emulated. The CLI runs tools itself, inside its own loop, which would take
+access checks and approvals away from the brain. So the tools are described in the system
+prompt instead, and the reply is constrained by a JSON schema to either a list of tool calls
+or an answer. The brain then runs the calls, exactly as it does for vendors with native tool
+calling. The cost: a request that offers tools cannot stream its text.
 """
 
 import asyncio
@@ -10,8 +16,9 @@ import json
 import os
 import tempfile
 import time
+import uuid
 from collections.abc import AsyncIterator, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Protocol
 
 from core.config import ModelSpec
@@ -23,6 +30,8 @@ from core.llm.types import (
     StopReason,
     StreamEvent,
     TextDelta,
+    ToolCall,
+    ToolSpec,
     Usage,
 )
 
@@ -97,14 +106,76 @@ class SubprocessRunner:
         )
 
 
+_TOOL_INSTRUCTIONS = """
+
+<functions>
+The application you run inside can run the functions listed below for you. You cannot run
+them yourself, and they are not tools available to you. To have the application run one or
+more of them, list them in the tool_calls field of your structured reply and leave answer
+empty; the application runs them and sends you the results in its next message. When you
+need nothing more, or no function fits, leave tool_calls empty and write your whole reply in
+answer.
+
+{listing}
+</functions>"""
+
+
+def _render_turn(message: Message) -> str:
+    """One turn as plain text, including any tool calls or tool results it carries."""
+    parts = [
+        f'<tool_result name="{r.name}" status="{"error" if r.is_error else "ok"}">\n'
+        f"{r.content}\n</tool_result>"
+        for r in message.tool_results
+    ]
+    if message.content:
+        parts.append(message.content)
+    if message.tool_calls:
+        calls = ", ".join(f"{c.name}({json.dumps(dict(c.arguments))})" for c in message.tool_calls)
+        parts.append(f"(asked the application to run: {calls})")
+    return "\n".join(parts)
+
+
 def render_prompt(messages: Sequence[Message]) -> str:
     """Fold a conversation into the single prompt the CLI accepts."""
+    last = messages[-1]
     if len(messages) == 1:
-        return messages[0].content
-    earlier = "\n".join(f"{m.role.value.upper()}: {m.content}" for m in messages[:-1])
-    return (
-        f"Conversation so far:\n{earlier}\n\n"
-        f"Reply to the latest user message:\n{messages[-1].content}"
+        return _render_turn(last)
+    earlier = "\n".join(f"{m.role.value.upper()}: {_render_turn(m)}" for m in messages[:-1])
+    lead = (
+        "Results of the functions you asked the application to run:"
+        if last.tool_results
+        else "Reply to the latest user message:"
+    )
+    return f"Conversation so far:\n{earlier}\n\n{lead}\n{_render_turn(last)}"
+
+
+def tool_reply_schema(tools: Sequence[ToolSpec]) -> dict[str, Any]:
+    """Reply shape for emulated tool calling: tool calls, or an answer."""
+    variants = [
+        {
+            "type": "object",
+            "additionalProperties": False,
+            "required": ["name", "arguments"],
+            "properties": {"name": {"const": t.name}, "arguments": dict(t.input_schema)},
+        }
+        for t in tools
+    ]
+    return {
+        "type": "object",
+        "additionalProperties": False,
+        "required": ["tool_calls", "answer"],
+        "properties": {
+            "tool_calls": {"type": "array", "items": {"anyOf": variants}},
+            "answer": {"type": "string"},
+        },
+    }
+
+
+def _tool_listing(tools: Sequence[ToolSpec]) -> str:
+    return "\n".join(
+        f"- {t.name}: {t.description}\n"
+        f"  Arguments (JSON schema): {json.dumps(dict(t.input_schema))}"
+        for t in tools
     )
 
 
@@ -140,9 +211,16 @@ class ClaudeCodeProvider:
             raise ProviderUnavailableError(
                 f"{self.name}: exit {result.returncode}: {result.stderr.strip()[:200]}"
             )
-        return self._completion(payload, start)
+        completion = self._completion(payload, start)
+        return _read_tool_reply(completion) if request.offers_tools else completion
 
     async def stream(self, request: LLMRequest) -> AsyncIterator[StreamEvent]:
+        if request.offers_tools:  # the reply is a JSON object, so there is no text to stream
+            completion = await self.complete(request)
+            if completion.text:
+                yield TextDelta(completion.text)
+            yield completion
+            return
         start = time.perf_counter()
         args = [*self._args(request, output_format="stream-json"), "--verbose"]
         args.append("--include-partial-messages")
@@ -167,21 +245,20 @@ class ClaudeCodeProvider:
         yield self._completion(final, start)
 
     def _args(self, request: LLMRequest, output_format: str) -> list[str]:
-        structured = (
-            ["--json-schema", json.dumps(request.json_schema)] if request.json_schema else []
-        )
-        return [
-            *self._base_args(request, output_format),
-            *structured,
-        ]
+        system, schema = request.system, request.json_schema
+        if request.offers_tools:
+            system += _TOOL_INSTRUCTIONS.format(listing=_tool_listing(request.tools))
+            schema = tool_reply_schema(request.tools)
+        structured = ["--json-schema", json.dumps(schema)] if schema else []
+        return [*self._base_args(system, output_format), *structured]
 
-    def _base_args(self, request: LLMRequest, output_format: str) -> list[str]:
+    def _base_args(self, system: str, output_format: str) -> list[str]:
         return [
             self._binary,
             "-p",
             "--model", self._spec.model,
             "--output-format", output_format,
-            "--system-prompt", request.system,
+            "--system-prompt", system,
             "--tools", "",  # a plain model call: no built-in tools
             "--no-session-persistence",
             "--strict-mcp-config",
@@ -224,6 +301,24 @@ class ClaudeCodeProvider:
             stop_reason=stop_reason,
             latency_ms=int((time.perf_counter() - start) * 1000),
         )
+
+
+def _read_tool_reply(completion: Completion) -> Completion:
+    """Turn the emulated ``{tool_calls, answer}`` object into a normal completion."""
+    try:
+        reply = json.loads(completion.text)
+    except json.JSONDecodeError:
+        return completion  # not the expected object: treat it as plain text
+    if not isinstance(reply, dict):
+        return completion
+    calls = tuple(
+        ToolCall(f"call_{uuid.uuid4().hex[:12]}", str(c["name"]), dict(c.get("arguments") or {}))
+        for c in reply.get("tool_calls") or ()
+        if isinstance(c, dict) and "name" in c
+    )
+    if calls:
+        return replace(completion, text="", tool_calls=calls, stop_reason=StopReason.TOOL_USE)
+    return replace(completion, text=str(reply.get("answer", "")))
 
 
 def _text_delta(payload: dict[str, Any]) -> str | None:

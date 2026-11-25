@@ -5,8 +5,8 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import anthropic
+from anthropic.types import ContentBlockParam, MessageParam, ToolParam
 from anthropic.types import Message as AnthropicMessage
-from anthropic.types import MessageParam
 
 from core.config import ModelSpec
 from core.llm.errors import ProviderUnavailableError, error_for_status
@@ -17,6 +17,7 @@ from core.llm.types import (
     StopReason,
     StreamEvent,
     TextDelta,
+    ToolCall,
     Usage,
 )
 
@@ -25,6 +26,7 @@ _STOP_REASONS = {
     "stop_sequence": StopReason.END,
     "max_tokens": StopReason.MAX_TOKENS,
     "refusal": StopReason.REFUSAL,
+    "tool_use": StopReason.TOOL_USE,
 }
 
 
@@ -51,6 +53,7 @@ class AnthropicProvider:
                 system=request.system,
                 messages=_to_params(request),
                 **_structured_output(request),
+                **_tools(request),
             )
         except anthropic.APIConnectionError as exc:  # includes timeouts
             raise ProviderUnavailableError(f"{self.name}: {exc}") from exc
@@ -67,6 +70,7 @@ class AnthropicProvider:
                 system=request.system,
                 messages=_to_params(request),
                 **_structured_output(request),
+                **_tools(request),
             ) as stream:
                 async for text in stream.text_stream:
                     yield TextDelta(text)
@@ -90,6 +94,11 @@ class AnthropicProvider:
             usage=Usage(input_tokens, usage.output_tokens),
             stop_reason=_STOP_REASONS.get(str(message.stop_reason), StopReason.OTHER),
             latency_ms=int((time.perf_counter() - start) * 1000),
+            tool_calls=tuple(
+                ToolCall(block.id, block.name, dict(block.input))
+                for block in message.content
+                if block.type == "tool_use"
+            ),
         )
 
 
@@ -99,11 +108,44 @@ def _structured_output(request: LLMRequest) -> dict[str, Any]:
     return {"output_config": {"format": {"type": "json_schema", "schema": request.json_schema}}}
 
 
+def _tools(request: LLMRequest) -> dict[str, Any]:
+    # Tool definitions are sent even when calls are not allowed: the API requires them
+    # whenever the history holds tool calls.
+    if not request.tools:
+        return {}
+    tools: list[ToolParam] = [
+        {"name": t.name, "description": t.description, "input_schema": dict(t.input_schema)}
+        for t in request.tools
+    ]
+    return {"tools": tools, "tool_choice": {"type": request.tool_choice.value}}
+
+
 def _to_params(request: LLMRequest) -> list[MessageParam]:
     params: list[MessageParam] = []
     for message in request.messages:
+        if not message.tool_calls and not message.tool_results:
+            if message.role is Role.USER:
+                params.append({"role": "user", "content": message.content})
+            else:
+                params.append({"role": "assistant", "content": message.content})
+            continue
+        blocks: list[ContentBlockParam] = [
+            {
+                "type": "tool_result",
+                "tool_use_id": result.call_id,
+                "content": result.content,
+                "is_error": result.is_error,
+            }
+            for result in message.tool_results
+        ]
+        if message.content:
+            blocks.append({"type": "text", "text": message.content})
+        blocks.extend(
+            {"type": "tool_use", "id": call.id, "name": call.name, "input": dict(call.arguments)}
+            for call in message.tool_calls
+        )
         if message.role is Role.USER:
-            params.append({"role": "user", "content": message.content})
+            params.append({"role": "user", "content": blocks})
         else:
-            params.append({"role": "assistant", "content": message.content})
+            params.append({"role": "assistant", "content": blocks})
     return params

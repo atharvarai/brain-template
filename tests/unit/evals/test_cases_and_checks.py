@@ -181,3 +181,27 @@ async def test_the_rubric_check_asks_the_judge() -> None:
     [unjudged] = build_checks(Expectations(rubric="x"), None)
     with pytest.raises(ValueError, match="no judge"):
         await unjudged.evaluate(case(), outcome("x"))
+
+
+async def test_the_calls_check_requires_tools_or_forbids_them() -> None:
+    def ran(*tools: str) -> EvalOutcome:
+        return EvalOutcome(answer="", retrieved=(), cited=(), latency_ms=1, tools_called=tools)
+
+    [needs] = build_checks(Expectations(calls=("find_order",)), None)
+    [forbids] = build_checks(Expectations(calls=()), None)  # alone, still a valid expectation
+
+    assert needs.kind is CheckKind.ANSWER
+    assert (await needs.evaluate(case(), ran("find_order", "other"))).passed
+    missed = await needs.evaluate(case(), ran("other"))
+    assert not missed.passed and "find_order" in missed.detail
+    assert (await forbids.evaluate(case(), ran())).passed
+    assert not (await forbids.evaluate(case(), ran("find_order"))).passed
+
+
+async def test_the_shipped_cases_only_name_tools_the_demo_server_offers() -> None:
+    from examples.edtech.mcp_server.server import build_server
+
+    offered = {tool.name for tool in await build_server().list_tools()}
+    for loaded in load_cases(EDTECH_PACK / "evals" / "cases.jsonl"):
+        for name in loaded.expect.calls or ():
+            assert name in offered, (loaded.id, name)

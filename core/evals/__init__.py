@@ -1,7 +1,8 @@
-"""Layer 08, evals: a pack's test set for answer quality, graded by checks and a judge."""
+"""Layer 09, evals: a pack's test set for answer quality, graded by checks and a judge."""
 
 from core.evals.cases import EvalCase, EvalError, Expectations, Turn, load_cases
 from core.evals.checks import (
+    Calls,
     Check,
     CheckKind,
     CheckResult,
@@ -28,6 +29,7 @@ from core.evals.targets import (
 __all__ = [
     "JUDGE_PROMPT",
     "AnswerTarget",
+    "Calls",
     "CaseResult",
     "Check",
     "CheckKind",

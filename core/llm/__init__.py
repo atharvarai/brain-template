@@ -21,6 +21,10 @@ from core.llm.types import (
     StopReason,
     StreamEvent,
     TextDelta,
+    ToolCall,
+    ToolChoice,
+    ToolResult,
+    ToolSpec,
     Usage,
 )
 
@@ -43,6 +47,10 @@ __all__ = [
     "StreamEvent",
     "StructuredOutputError",
     "TextDelta",
+    "ToolCall",
+    "ToolChoice",
+    "ToolResult",
+    "ToolSpec",
     "Usage",
     "complete_structured",
     "default_factory",

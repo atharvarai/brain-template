@@ -4,6 +4,7 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 
 from core import cli
 from core.observability import SqliteTraceStore
@@ -97,3 +98,51 @@ def test_a_pack_without_cases_is_a_clear_error(
     monkeypatch.setenv("BRAIN_PACK", str(rag_pack_dir))
     assert cli.main(["eval", "--retrieval"]) == 1
     assert "no eval cases" in capsys.readouterr().err
+
+
+SERVER = '''
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
+
+server = MCPServer("acme")
+
+
+@server.tool()
+def find_order(order_id: str) -> str:
+    """Find an order by id."""
+    if order_id == "missing":
+        raise ToolError("no such order")
+    return f"Order {order_id}: shipped"
+
+
+server.run()
+'''
+
+
+def test_tools_lists_discovered_tools_and_calls_one(
+    pack_dir: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    (pack_dir / "acme_tools.py").write_text(SERVER, encoding="utf-8")
+    config = yaml.safe_load((pack_dir / "brain.yaml").read_text())
+    config["tools"] = {
+        "servers": {"acme": {"transport": "stdio", "command": ["python", "acme_tools.py"]}}
+    }
+    (pack_dir / "brain.yaml").write_text(yaml.safe_dump(config))
+    monkeypatch.setenv("BRAIN_PACK", str(pack_dir))
+
+    assert cli.main(["tools"]) == 0
+    assert "find_order: Find an order by id." in capsys.readouterr().out
+
+    assert cli.main(["tools", "--call", "find_order", "--args", '{"order_id": "A-7"}']) == 0
+    assert "Order A-7: shipped" in capsys.readouterr().out
+
+    assert cli.main(["tools", "--call", "find_order", "--args", '{"order_id": "missing"}']) == 1
+    assert "ERROR:" in capsys.readouterr().out
+    assert cli.main(["tools", "--call", "find_order", "--args", "[1]"]) == 1
+
+
+def test_tools_says_so_when_the_pack_has_no_servers(
+    pack_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("BRAIN_PACK", str(pack_dir))
+    assert cli.main(["tools"]) == 1

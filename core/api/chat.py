@@ -10,9 +10,9 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, model_validator
 
 from core.api.context import AppContext, get_context
-from core.api.schemas import CallMetadata, ChatMessage, SourceOut
+from core.api.schemas import CallMetadata, ChatMessage, SourceOut, ToolActivityOut
 from core.llm import LLMError, Message, Role, TextDelta
-from core.pipeline import Answer, Pipeline
+from core.pipeline import Answer, Pipeline, ToolActivity
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1", tags=["chat"])
@@ -33,12 +33,14 @@ class ChatMetadata(CallMetadata):
     """Everything about an answer except its text: sent as the final stream event."""
 
     sources: list[SourceOut]
+    tools: list[ToolActivityOut]
 
     @classmethod
     def from_answer(cls, answer: Answer) -> Self:
         base = CallMetadata.build(answer.completion, answer.prompts, answer.trace_id)
         sources = [SourceOut.from_source(source) for source in answer.sources]
-        return cls(sources=sources, **base.model_dump())
+        tools = [ToolActivityOut.from_activity(activity) for activity in answer.tools]
+        return cls(sources=sources, tools=tools, **base.model_dump())
 
 
 class ChatResponse(ChatMetadata):
@@ -50,11 +52,14 @@ def _sse(event: str, data: dict[str, Any]) -> str:
 
 
 async def _event_stream(pipeline: Pipeline, messages: list[Message]) -> AsyncIterator[str]:
-    """delta events carry text, one done event carries metadata, error ends the stream."""
+    """delta events carry text, tool events report each tool run, one done event carries
+    metadata, and an error event ends the stream."""
     try:
         async for event in pipeline.stream(messages):
             if isinstance(event, TextDelta):
                 yield _sse("delta", {"text": event.text})
+            elif isinstance(event, ToolActivity):
+                yield _sse("tool", ToolActivityOut.from_activity(event).model_dump())
             else:
                 yield _sse("done", ChatMetadata.from_answer(event).model_dump())
     except LLMError:
