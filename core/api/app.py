@@ -7,6 +7,7 @@ from datetime import timedelta
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from core import __version__
 from core.access import AccessConfigError, RedactingAuditLog, SqliteAuditLog, build_access
@@ -186,7 +187,8 @@ def create_app(
     Tests pass their own settings and a factory that builds fake providers.
     """
     _configure_logging()
-    context = build_context(settings or Settings(), provider_factory or default_factory())
+    settings = settings or Settings()
+    context = build_context(settings, provider_factory or default_factory())
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -201,6 +203,9 @@ def create_app(
     app.include_router(title.router)
     app.include_router(feedback.router)
     app.include_router(runs.router)
+    if settings.web_dir is not None and (settings.web_dir / "index.html").is_file():
+        # A demo page only: production clients talk to the API.
+        app.mount("/demo", StaticFiles(directory=settings.web_dir, html=True), name="demo")
     app.add_exception_handler(ProviderUnavailableError, _provider_unavailable)
     app.add_exception_handler(ProviderRequestError, _provider_rejected)
     app.add_exception_handler(StructuredOutputError, _invalid_model_output)

@@ -28,3 +28,23 @@ def test_env_profile_overrides_the_active_one(pack_dir: Path) -> None:
 def test_unknown_profile_override_fails_at_startup(pack_dir: Path) -> None:
     with pytest.raises(PackError, match="model profile 'nope' is not defined"):
         create_app(Settings(pack=pack_dir, model_profile="nope"))
+
+
+def test_the_demo_page_is_served_only_when_its_folder_exists(
+    pack_dir: Path, tmp_path: Path
+) -> None:
+    from fastapi.testclient import TestClient
+
+    from core.api.app import create_app
+    from core.config import Settings
+
+    web = tmp_path / "web"
+    web.mkdir()
+    (web / "index.html").write_text("<!doctype html><title>demo</title>")
+
+    with_page = TestClient(create_app(Settings(pack=pack_dir, web_dir=web)))
+    without = TestClient(create_app(Settings(pack=pack_dir, web_dir=None)))
+
+    assert with_page.get("/demo/").status_code == 200
+    assert "demo" in with_page.get("/demo/").text
+    assert without.get("/demo/").status_code == 404
