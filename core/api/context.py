@@ -6,7 +6,10 @@ from typing import cast
 from fastapi import Request
 
 from core.config import DomainPack
+from core.llm import ModelGateway
+from core.observability import FeedbackSink, Tracer, TraceReader
 from core.pipeline import Pipeline
+from core.prompts import PromptStore
 from core.tasks.title import TitleGenerator
 
 
@@ -16,6 +19,11 @@ class AppContext:
 
     pack: DomainPack
     model_profile: str
+    gateway: ModelGateway
+    prompts: PromptStore
+    tracer: Tracer
+    traces: TraceReader
+    feedback: FeedbackSink
     pipeline: Pipeline
     title_generator: TitleGenerator
 

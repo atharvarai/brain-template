@@ -18,6 +18,9 @@ class PromptRef:
     version: int
     checksum: str
 
+    def __str__(self) -> str:
+        return f"{self.name}@v{self.version}#{self.checksum}"
+
 
 @dataclass(frozen=True, slots=True)
 class Prompt:

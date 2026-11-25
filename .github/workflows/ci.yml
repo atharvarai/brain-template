@@ -13,3 +13,6 @@ jobs:
       - uses: astral-sh/setup-uv@v5
       - run: uv sync
       - run: make check
+      # Retrieval quality gate: builds the example index and fails below the pack's bar.
+      - run: make ingest
+      - run: make eval-retrieval

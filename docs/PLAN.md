@@ -1,6 +1,6 @@
 # Brain Template: Repo Plan
 
-Status: approved 2026-11-25. M0 to M3 built; see section 8.
+Status: approved 2026-11-25. M0 to M4 built; see section 8.
 
 ## 1. Goal
 
@@ -54,6 +54,7 @@ flowchart LR
 | 7 | Local embeddings by default (fastembed, ONNX) | Free, no second vendor, no PyTorch install; interface allows a hosted embedder | Lower retrieval quality than top hosted embedders; default model is English-only |
 | 8 | Cache behind an interface, stored in the same local or Postgres store; Redis adapter later | Fewer moving parts | Slower than Redis; fine at demo scale |
 | 9 | Own trace table + JSON logs; optional OpenTelemetry export | Works with zero extra services; companies plug in their own backend | No trace UI out of the box |
+| 9a | Evals live in the pack; CI runs retrieval-only evals, answer evals run locally | Retrieval needs no model, so CI stays free and keyless; answer quality needs a model and costs money | Answer regressions are caught only when someone runs `make eval` |
 | 10 | A company is a "domain pack" folder + one `brain.yaml` | Makes "what do I change?" a single folder | Config schema must stay small and stable |
 | 11 | Code standards: SOLID, dependency injection through an app factory, Protocols as ports, Strategy / Adapter / Factory / Chain of Responsibility where they fit; ruff + mypy strict + import-linter in CI | Readable reference code is the product | More files than a script-style project |
 
@@ -183,7 +184,7 @@ Each milestone ends with a runnable state and tests.
 | M1 | Model (01) (done) | `/v1/chat` streams an answer through `LLMProvider`; Claude Code CLI, Anthropic, OpenAI and Ollama adapters built by a factory from the `Provider` enum; fallback chain with circuit breaker; fake LLM for tests |
 | M2 | Prompt (02) (done) | System prompt composed from a core skeleton and the pack's persona file, versioned by filename with optional pins; structured output for one task (conversation titles); prompt name, version and checksum reported per request |
 | M3 | RAG (03) (done) | `make ingest` loads, chunks, embeds the ed-tech docs; answers cite sources; says it does not know when the documents lack the answer. Built thin: Markdown loader only, SQLite store only, public documents only until M7. Not yet: PDF loader, production vector store adapter, reranking, query rewriting for follow-up questions |
-| M4 | Observability + evals (09) | Every request writes a trace (tokens, cost, latency, prompt version, chunk ids); `make eval` runs the pack's cases and prints a pass rate; CI fails below a threshold |
+| M4 | Observability + evals (09) (done) | Every request writes a trace (tokens, cost, latency, prompt version, chunk ids); `make eval` runs the pack's cases and prints a pass rate; CI fails below a threshold. Built: tracer with spans and failover events, SQLite + log sinks, feedback endpoint, `traces` command; eval cases with text, retrieval (document or section), citation and judge checks; answer and retrieval modes; report archive with regressions. CI gates on retrieval evals only, since CI has no model. Findings that changed retrieval: stopwords in keyword search, and an optional reranker (on for Skilvanta) that lifted section-level retrieval from 20/23 to 22/23. Not yet: OpenTelemetry export, a trace UI, a held-out eval split, judge calibration |
 | M5 | Tools (04) | Demo MCP server for ed-tech; brain discovers tools and completes a single tool round trip; tool errors handled |
 | M6 | Agent (05) | Multi-step tasks work within step and token budgets; write tools pause for approval; per-step traces |
 | M7 | Access (06) | JWT verified; retrieval filtered by labels in SQL; tool calls checked against policy and forwarded with the user token; audit log; access-denied eval cases pass |

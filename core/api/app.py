@@ -6,7 +6,7 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from core import __version__
-from core.api import chat, health, title
+from core.api import chat, feedback, health, title
 from core.api.context import AppContext
 from core.config import ModelTier, PackError, Settings, load_pack
 from core.llm import (
@@ -17,6 +17,13 @@ from core.llm import (
     StructuredOutputError,
     default_factory,
 )
+from core.observability import (
+    FanOutSink,
+    LoggingTraceSink,
+    PriceBook,
+    SqliteTraceStore,
+    Tracer,
+)
 from core.pipeline import Pipeline
 from core.prompts import ChainedPromptStore, FilePromptStore, build_system_prompt, builtin_store
 from core.rag import NullRetriever, Retriever, build_rag
@@ -25,6 +32,9 @@ from core.tasks.title import TITLE_PROMPT, TitleGenerator
 RAG_TURN_PROMPT = "rag_turn"
 
 logger = logging.getLogger(__name__)
+
+
+TRACES_FILE = "traces.sqlite3"
 
 
 def build_context(settings: Settings, provider_factory: ProviderFactory) -> AppContext:
@@ -43,6 +53,13 @@ def build_context(settings: Settings, provider_factory: ProviderFactory) -> AppC
     prompts = ChainedPromptStore(
         [FilePromptStore(pack.prompts_dir, pack.config.prompts.pinned), builtin_store()]
     )
+    store = SqliteTraceStore(pack.state_dir(settings.data_dir) / TRACES_FILE)
+    tracer = Tracer(
+        FanOutSink([store, LoggingTraceSink()]),
+        PriceBook(models.prices),
+        capture_content=pack.config.observability.capture_content,
+        attributes={"pack": pack.config.name, "profile": profile},
+    )
     rag = build_rag(pack, settings.data_dir)
     retriever: Retriever = NullRetriever()
     if rag is not None:
@@ -53,15 +70,21 @@ def build_context(settings: Settings, provider_factory: ProviderFactory) -> AppC
     return AppContext(
         pack=pack,
         model_profile=profile,
+        gateway=gateway,
+        prompts=prompts,
+        tracer=tracer,
+        traces=store,
+        feedback=store,
         pipeline=Pipeline(
             gateway,
             build_system_prompt(prompts, pack.config),
             retriever,
             turn_prompt=prompts.get(RAG_TURN_PROMPT),
+            tracer=tracer,
             top_k=rag.top_k if rag else 1,
         ),
         title_generator=TitleGenerator(
-            gateway.for_tier(ModelTier.SMALL), prompts.get(TITLE_PROMPT)
+            gateway.for_tier(ModelTier.SMALL), prompts.get(TITLE_PROMPT), tracer
         ),
     )
 
@@ -109,6 +132,7 @@ def create_app(
     app.include_router(health.router)
     app.include_router(chat.router)
     app.include_router(title.router)
+    app.include_router(feedback.router)
     app.add_exception_handler(ProviderUnavailableError, _provider_unavailable)
     app.add_exception_handler(ProviderRequestError, _provider_rejected)
     app.add_exception_handler(StructuredOutputError, _invalid_model_output)

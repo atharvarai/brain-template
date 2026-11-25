@@ -12,6 +12,9 @@ rag:
   docs: docs
   top_k: 5
   embedder: {kind: fastembed, model: BAAI/bge-small-en-v1.5}
+  # Second pass over the top 20 candidates. Turned on because it lifted section-level
+  # retrieval in `make eval-retrieval` from 21/23 to 23/23 (see docs/PLAN.md, M4).
+  reranker: {kind: fastembed, model: jinaai/jina-reranker-v1-tiny-en, candidates: 20}
 
 # Each profile maps every tier to an ordered fallback chain.
 # Pick one with `active`, or override per process with BRAIN_MODEL_PROFILE.
@@ -42,3 +45,28 @@ models:
     #   small: [{provider: openai, model: <small-model-id>}]
     #   mid: [{provider: openai, model: <mid-model-id>}]
     #   large: [{provider: openai, model: <large-model-id>}]
+
+  # US dollars per million tokens, by model id: used to cost every trace and eval run.
+  # The claude_code aliases carry API list prices so traces show what the same traffic would
+  # cost on the API; the subscription itself is not billed per call. Ollama runs are free.
+  prices:
+    claude-haiku-5-5: {input: 0.10, output: 0.50}
+    claude-sonnet-5-5: {input: 2.00, output: 10.00}
+    claude-opus-5-5: {input: 4.00, output: 20.00}
+    haiku: {input: 0.10, output: 0.50}
+    sonnet: {input: 2.00, output: 10.00}
+    opus: {input: 4.00, output: 20.00}
+    "llama3.1:8b": {input: 0, output: 0}
+
+# Traces keep timings, tokens, cost, prompt versions and document ids. Question and answer
+# text is kept only when capture_content is true: fine here because all data is synthetic.
+observability:
+  capture_content: true
+
+# `make eval` asks the model every case and grades it; `make eval-retrieval` checks only
+# retrieval, needs no model and runs in CI. Both exit non-zero below min_pass_rate.
+evals:
+  cases: evals/cases.jsonl
+  min_pass_rate: 0.85
+  judge_tier: mid
+  concurrency: 4

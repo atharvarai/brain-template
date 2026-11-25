@@ -31,6 +31,14 @@ def pack_dir(tmp_path: Path) -> Path:
     return tmp_path
 
 
+@pytest.fixture(autouse=True)
+def isolated_data_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Index, traces and eval reports go to a temp folder, never into the repo's .brain/."""
+    data_dir = tmp_path / "brain-data"
+    monkeypatch.setenv("BRAIN_DATA_DIR", str(data_dir))
+    return data_dir
+
+
 @pytest.fixture
 def anyio_backend() -> str:
     """Run async tests on asyncio only."""

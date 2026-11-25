@@ -53,8 +53,9 @@ class SourceOut(BaseModel):
 
 
 class CallMetadata(BaseModel):
-    """What produced an answer: recorded per request so any reply can be traced back."""
+    """What produced an answer. ``trace_id`` finds the full trace and is what feedback cites."""
 
+    trace_id: str
     provider: str
     model: str
     stop_reason: str
@@ -63,8 +64,9 @@ class CallMetadata(BaseModel):
     prompts: list[PromptRefOut]
 
     @classmethod
-    def build(cls, completion: Completion, prompts: tuple[PromptRef, ...]) -> Self:
+    def build(cls, completion: Completion, prompts: tuple[PromptRef, ...], trace_id: str) -> Self:
         return cls(
+            trace_id=trace_id,
             provider=completion.spec.provider.value,
             model=completion.spec.model,
             stop_reason=completion.stop_reason.value,

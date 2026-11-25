@@ -6,11 +6,11 @@ Clone it, add one folder that describes your company (docs, tools, roles, prompt
 cases), and you get an assistant built from clearly separated AI layers: model, prompts,
 RAG, tools (MCP), agent, access control, guardrails, cache and router, observability and evals.
 
-**Status: early.** Milestones M0 to M3 are done: the service answers questions from a
+**Status: early.** Milestones M0 to M4 are done: the service answers questions from a
 company's documents with citations, through a vendor-neutral model layer with failover,
-versioned prompts and schema-validated structured output. There is no tool use, access
-control or evaluation suite yet. See [docs/PLAN.md](docs/PLAN.md) for the design and the
-milestone list.
+versioned prompts and schema-validated structured output. Every request is traced, and each
+pack carries an eval set that gates changes. There is no tool use or access control yet.
+See [docs/PLAN.md](docs/PLAN.md) for the design and the milestone list.
 
 ## How it is organised
 
@@ -103,7 +103,9 @@ labels: []          # [] = public. [internal] or [admin_only] = restricted
 - **Chunking follows the document.** Files are split on headings, and each chunk keeps its
   title and heading path.
 - **Search is hybrid.** Semantic search (local embedding model, no API key) and keyword
-  search (BM25 with stemming) are merged with reciprocal rank fusion.
+  search (BM25 with stemming, stopwords dropped) are merged with reciprocal rank fusion.
+- **Optional reranking.** A local cross-encoder can re-order the top candidates
+  (`rag.reranker` in `brain.yaml`). It is off by default; turn it on when your evals say so.
 - **Answers cite their sources.** Retrieved chunks are numbered, the model cites them as
   `[1]`, and the response lists every source with a `cited` flag.
 - **Restricted documents stay hidden for now.** Labels are stored with every chunk, and until
@@ -112,8 +114,57 @@ labels: []          # [] = public. [internal] or [admin_only] = restricted
 Everything is behind interfaces (`Loader`, `Chunker`, `Embedder`, `ChunkStore`, `Retriever`).
 The shipped store is a zero-install SQLite file with brute-force vector search, which suits
 development and small document sets. A production vector database adapter is not written yet.
-The default embedding model is English-only; set another model in `brain.yaml` for other
-languages.
+The default embedding and reranking models are English-only; set multilingual models in
+`brain.yaml` for other languages (for example `BAAI/bge-reranker-v2-m3`, which is much slower).
+
+## Observability
+
+Every request (chat, title, eval, judge) writes one trace:
+
+- timings per step (retrieve, generate) and time to first token when streaming
+- provider and model that answered, tokens, and cost from the prices in `brain.yaml`
+- prompt names, versions and checksums, plus the chunks retrieved and the ones cited
+- failover events, such as a provider failing before the next one answered
+- the question and answer text, only if the pack sets `observability.capture_content`
+
+Traces go to a SQLite file in `.brain/` and to one JSON log line each. Sinks are behind a
+`TraceSink` interface, so a company can add its own backend. Responses carry a `trace_id`;
+`POST /v1/feedback` records a thumbs up or down against it.
+
+```bash
+make traces                                    # recent traces, p50/p95, cost, feedback
+uv run python -m core.cli traces --id <id>     # one trace in full
+```
+
+## Evals
+
+A pack's `evals/cases.jsonl` lists questions and what a good answer shows:
+
+```json
+{"id": "placement-eligibility", "question": "What do I need to qualify for placement support?",
+ "tags": ["placement"],
+ "expect": {"contains_all": ["80%", "75%"], "retrieves": ["placement-support.md#Eligibility"],
+            "rubric": "Lists all three requirements: 80% assignments, 75% attendance, 2 mock interviews."}}
+```
+
+Each expectation becomes a check: `contains_all`, `contains_any`, `excludes` (for leaks),
+`retrieves` and `cites` (a document, or one section with `doc.md#Heading`), and `rubric`,
+graded by a judge model.
+
+```bash
+make eval-retrieval   # retrieval checks only: no model, about 2 s, runs in CI
+make eval             # asks the model every case and grades it
+```
+
+Both print per-case results, pass rate by check and tag, latency and cost. They also
+compare with the previous run, listing regressions and fixes, and exit non-zero below
+`evals.min_pass_rate`.
+
+Skilvanta's 27 cases cover facts, policies, multi-step reasoning, leaks of restricted
+documents, prompt injection, follow-up questions and a Hinglish question. The latest run
+through the `claude_code` profile passed 26 of 27 in about 50 s, and the same traffic would
+cost about $0.14 at API list prices. The failing case is the Hinglish one: the English-only
+reranker drops the section that holds the answer.
 
 ## Quick start
 

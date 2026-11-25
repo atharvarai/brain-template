@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from core.llm.errors import AllProvidersFailedError, ProviderUnavailableError
 from core.llm.provider import LLMProvider
 from core.llm.types import Completion, LLMRequest, StreamEvent
+from core.observability import record_event
 
 logger = logging.getLogger(__name__)
 
@@ -65,13 +66,12 @@ class FallbackChain:
         for provider, breaker in self._links:
             if not breaker.allows_request():
                 errors.append(f"{provider.name}: circuit open")
+                record_event("provider_skipped", provider=provider.name, reason="circuit open")
                 continue
             try:
                 completion = await provider.complete(request)
             except ProviderUnavailableError as exc:
-                breaker.record_failure()
-                errors.append(str(exc))
-                logger.warning("provider unavailable, trying next: %s", exc)
+                self._failed(provider, breaker, exc, errors)
                 continue
             breaker.record_success()
             return completion
@@ -83,6 +83,7 @@ class FallbackChain:
         for provider, breaker in self._links:
             if not breaker.allows_request():
                 errors.append(f"{provider.name}: circuit open")
+                record_event("provider_skipped", provider=provider.name, reason="circuit open")
                 continue
             started = False
             try:
@@ -90,12 +91,24 @@ class FallbackChain:
                     started = True
                     yield event
             except ProviderUnavailableError as exc:
-                breaker.record_failure()
                 if started:
+                    breaker.record_failure()
+                    record_event("provider_failed_mid_stream", provider=provider.name)
                     raise
-                errors.append(str(exc))
-                logger.warning("provider unavailable, trying next: %s", exc)
+                self._failed(provider, breaker, exc, errors)
                 continue
             breaker.record_success()
             return
         raise AllProvidersFailedError(tuple(errors))
+
+    @staticmethod
+    def _failed(
+        provider: LLMProvider,
+        breaker: CircuitBreaker,
+        exc: ProviderUnavailableError,
+        errors: list[str],
+    ) -> None:
+        breaker.record_failure()
+        errors.append(str(exc))
+        logger.warning("provider unavailable, trying next: %s", exc)
+        record_event("provider_failed", provider=provider.name, error=str(exc)[:200])

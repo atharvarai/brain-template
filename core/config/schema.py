@@ -7,7 +7,7 @@ from typing import Self
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from core.config.enums import EmbedderKind, ModelTier, Provider
+from core.config.enums import EmbedderKind, ModelTier, Provider, RerankerKind, StopwordList
 
 
 class _Strict(BaseModel):
@@ -27,11 +27,23 @@ class ModelSpec(_Strict):
 ModelProfile = dict[ModelTier, tuple[ModelSpec, ...]]
 
 
+class Price(_Strict):
+    """List price of a model in US dollars per million tokens. Used to cost each trace."""
+
+    input: float = Field(ge=0)
+    output: float = Field(ge=0)
+
+    def cost(self, input_tokens: int, output_tokens: int) -> float:
+        return (input_tokens * self.input + output_tokens * self.output) / 1_000_000
+
+
 class ModelsConfig(_Strict):
     """Named model profiles (for example dev / prod), each mapping every tier to a chain."""
 
     active: str
     profiles: dict[str, ModelProfile]
+    # Keyed by model id. A model with no entry is traced with an unknown cost, not zero.
+    prices: dict[str, Price] = Field(default_factory=dict)
 
     @model_validator(mode="after")
     def _profiles_are_complete(self) -> Self:
@@ -69,6 +81,15 @@ class EmbedderConfig(_Strict):
     model: str = "BAAI/bge-small-en-v1.5"  # used by kinds that load a named model
 
 
+class RerankerConfig(_Strict):
+    """Optional second pass: a cross-encoder reads the question with each candidate and
+    re-orders them. Slower than the first pass, so it only sees the top ``candidates``."""
+
+    kind: RerankerKind = RerankerKind.FASTEMBED
+    model: str = "jinaai/jina-reranker-v1-tiny-en"
+    candidates: int = Field(default=20, ge=1, le=100)
+
+
 class RagConfig(_Strict):
     """Retrieval over the company's documents. Leave it out for a brain with no documents."""
 
@@ -76,6 +97,24 @@ class RagConfig(_Strict):
     top_k: int = Field(default=5, ge=1, le=20)  # chunks given to the model per question
     chunk_chars: int = Field(default=1200, ge=100)
     embedder: EmbedderConfig = Field(default_factory=EmbedderConfig)
+    stopwords: StopwordList = StopwordList.ENGLISH  # dropped from keyword queries
+    reranker: RerankerConfig | None = None  # off unless the pack's evals show it helps
+
+
+class ObservabilityConfig(_Strict):
+    """What each request's trace keeps. Traces always hold timings, tokens, cost, model,
+    prompt versions and document ids; the user's text and the answer only if allowed here."""
+
+    capture_content: bool = False
+
+
+class EvalsConfig(_Strict):
+    """The pack's evaluation set and the bar it has to clear."""
+
+    cases: str = "evals/cases.jsonl"  # relative to the pack root
+    min_pass_rate: float = Field(default=0.8, ge=0, le=1)  # `eval` exits non-zero below it
+    judge_tier: ModelTier = ModelTier.MID  # model that grades rubric checks
+    concurrency: int = Field(default=4, ge=1, le=32)
 
 
 class BrainConfig(_Strict):
@@ -86,3 +125,5 @@ class BrainConfig(_Strict):
     models: ModelsConfig
     prompts: PromptsConfig = Field(default_factory=PromptsConfig)
     rag: RagConfig | None = None
+    observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
+    evals: EvalsConfig = Field(default_factory=EvalsConfig)

@@ -9,7 +9,9 @@ from core.rag.embedder import build_embedder
 from core.rag.errors import RagError
 from core.rag.ingest import Ingestor
 from core.rag.loaders import MarkdownFolderLoader
-from core.rag.retriever import HybridRetriever
+from core.rag.reranker import RerankingRetriever, build_reranker
+from core.rag.retriever import HybridRetriever, Retriever
+from core.rag.stopwords import STOPWORDS
 from core.rag.store import SqliteChunkStore
 
 
@@ -17,7 +19,7 @@ from core.rag.store import SqliteChunkStore
 class RagComponents:
     store: SqliteChunkStore
     ingestor: Ingestor
-    retriever: HybridRetriever
+    retriever: Retriever
     top_k: int
 
 
@@ -30,11 +32,16 @@ def build_rag(pack: DomainPack, data_dir: Path) -> RagComponents | None:
         raise RagError(f"documents folder not found: {pack.docs_dir}")
 
     embedder = build_embedder(config.embedder)
-    store = SqliteChunkStore(data_dir / pack.root.name / "rag.sqlite3")
+    store = SqliteChunkStore(pack.state_dir(data_dir) / "rag.sqlite3", STOPWORDS[config.stopwords])
     ingestor = Ingestor(
         loader=MarkdownFolderLoader(pack.docs_dir),
         chunker=MarkdownChunker(config.chunk_chars),
         embedder=embedder,
         store=store,
     )
-    return RagComponents(store, ingestor, HybridRetriever(embedder, store), config.top_k)
+    retriever: Retriever = HybridRetriever(embedder, store)
+    if config.reranker is not None:
+        retriever = RerankingRetriever(
+            retriever, build_reranker(config.reranker), config.reranker.candidates
+        )
+    return RagComponents(store, ingestor, retriever, config.top_k)

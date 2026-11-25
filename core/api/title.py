@@ -24,5 +24,5 @@ async def title(
     body: TitleRequest, context: Annotated[AppContext, Depends(get_context)]
 ) -> TitleResponse:
     result = await context.title_generator.generate([m.to_message() for m in body.messages])
-    metadata = CallMetadata.build(result.completion, (result.prompt,))
+    metadata = CallMetadata.build(result.completion, (result.prompt,), result.trace_id)
     return TitleResponse(title=result.title, **metadata.model_dump())

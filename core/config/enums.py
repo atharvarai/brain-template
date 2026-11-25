@@ -20,6 +20,20 @@ class EmbedderKind(StrEnum):
     HASHING = "hashing"  # word hashing, no model: tests and smoke runs only
 
 
+class RerankerKind(StrEnum):
+    """Which model re-scores retrieval candidates against the question."""
+
+    FASTEMBED = "fastembed"  # local ONNX cross-encoder, free and offline
+    OVERLAP = "overlap"  # word overlap, no model: tests and smoke runs only
+
+
+class StopwordList(StrEnum):
+    """Words ignored by keyword search. Pick the language of the pack's documents."""
+
+    ENGLISH = "english"
+    NONE = "none"  # keep every word: for languages without a list yet
+
+
 class ModelTier(StrEnum):
     """How capable a model a task needs. Features ask for a tier, never for a model."""
 

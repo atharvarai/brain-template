@@ -77,7 +77,8 @@ def _visible(labels: frozenset[str], allowed: frozenset[str] | None) -> bool:
 
 
 class SqliteChunkStore:
-    def __init__(self, path: Path | str) -> None:
+    def __init__(self, path: Path | str, stopwords: frozenset[str] = frozenset()) -> None:
+        self._stopwords = stopwords
         if isinstance(path, Path):
             path.parent.mkdir(parents=True, exist_ok=True)
         # One connection shared across worker threads, guarded by a lock.
@@ -162,6 +163,8 @@ class SqliteChunkStore:
         self, query: str, k: int, allowed_labels: frozenset[str] | None
     ) -> list[ScoredChunk]:
         words = _WORD.findall(query.lower())
+        # Drop filler words, unless the query is nothing but filler.
+        words = [w for w in words if w not in self._stopwords] or words
         if not words:
             return []
         # Quote every word so user text can never be read as FTS5 query syntax.

@@ -30,6 +30,14 @@ class DomainPack:
     def docs_dir(self) -> Path | None:
         return self.root / self.config.rag.docs if self.config.rag else None
 
+    @property
+    def eval_cases(self) -> Path:
+        return self.root / self.config.evals.cases
+
+    def state_dir(self, data_dir: Path) -> Path:
+        """Where the brain keeps this pack's own data (index, traces, eval reports)."""
+        return data_dir / self.root.name
+
 
 def load_pack(root: Path) -> DomainPack:
     """Load and validate the pack at ``root``. Raises ``PackError`` with a clear reason."""

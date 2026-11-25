@@ -32,6 +32,11 @@ class Chunk:
     labels: frozenset[str] = frozenset()
 
     @property
+    def id(self) -> str:
+        """Stable within one index build: the document plus the chunk's place in it."""
+        return f"{self.source}#{self.position}"
+
+    @property
     def searchable_text(self) -> str:
         """Text that is embedded and indexed: the chunk with its title and heading in front,
         so a chunk like "Within 7 days." still knows it belongs to a refund policy."""
