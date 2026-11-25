@@ -68,7 +68,9 @@ def _parser() -> argparse.ArgumentParser:
     traces.add_argument("--operation", default=None, help="only chat, title, eval, judge...")
     traces.add_argument("--id", default=None, help="print one trace in full, as JSON")
 
-    tools = commands.add_parser("tools", help="list discovered tools, or call one")
+    tools = commands.add_parser(
+        "tools", help="list discovered tools, or call one (operator use: no approval step)"
+    )
     tools.add_argument("--call", default=None, metavar="NAME", help="run this tool once")
     tools.add_argument("--args", default="{}", help="arguments for --call, as a JSON object")
     return parser
@@ -207,7 +209,8 @@ def _tools(args: argparse.Namespace, settings: Settings) -> int:
                 print(f"server '{server}' could not be reached")
             if args.call is None:
                 for spec in registry.specs:
-                    print(f"{spec.name}: {spec.description}")
+                    effect = "read-only" if registry.is_read_only(spec.name) else "changes data"
+                    print(f"{spec.name} ({effect}): {spec.description}")
                     print(f"    arguments: {json.dumps(dict(spec.input_schema))}")
                 return 0 if registry.specs else 1
             call = ToolCall(f"cli_{uuid.uuid4().hex[:8]}", args.call, arguments)

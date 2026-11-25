@@ -23,7 +23,7 @@ from mcp_types import CONNECTION_CLOSED, CallToolResult, Implementation
 
 from core import __version__
 from core.llm import ToolSpec
-from core.tools.source import ToolOutput
+from core.tools.source import ToolInfo, ToolOutput
 
 logger = logging.getLogger(__name__)
 
@@ -56,12 +56,12 @@ class McpToolSource:
     def name(self) -> str:
         return self._name
 
-    async def open(self) -> Sequence[ToolSpec]:
+    async def open(self) -> Sequence[ToolInfo]:
         """Connect and discover. Raises if the first connection fails."""
         stack = AsyncExitStack()
         try:
             tasks = await stack.enter_async_context(anyio.create_task_group())
-            specs: Sequence[ToolSpec] = await tasks.start(self._supervise)
+            specs: Sequence[ToolInfo] = await tasks.start(self._supervise)
             stack.callback(tasks.cancel_scope.cancel)  # on close, stop the supervisor
         except BaseException:
             await stack.aclose()
@@ -96,7 +96,7 @@ class McpToolSource:
             raise ConnectionError(f"MCP server '{self._name}' is reconnecting")
         return self._client
 
-    async def _supervise(self, *, task_status: TaskStatus[Sequence[ToolSpec]]) -> None:
+    async def _supervise(self, *, task_status: TaskStatus[Sequence[ToolInfo]]) -> None:
         """Own the session: open it, wait until a call reports it dead, reopen it."""
         first, backoff = True, 1.0
         while True:
@@ -137,13 +137,16 @@ class McpToolSource:
         )
 
     @staticmethod
-    async def _discover(client: Client) -> list[ToolSpec]:
-        specs: list[ToolSpec] = []
+    async def _discover(client: Client) -> list[ToolInfo]:
+        specs: list[ToolInfo] = []
         cursor: str | None = None
         for _ in range(_MAX_PAGES):
             page = await client.list_tools(cursor=cursor)
             specs.extend(
-                ToolSpec(tool.name, tool.description or "", dict(tool.input_schema))
+                ToolInfo(
+                    ToolSpec(tool.name, tool.description or "", dict(tool.input_schema)),
+                    read_only=bool(tool.annotations and tool.annotations.read_only_hint),
+                )
                 for tool in page.tools
             )
             cursor = page.next_cursor

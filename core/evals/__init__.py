@@ -2,6 +2,7 @@
 
 from core.evals.cases import EvalCase, EvalError, Expectations, Turn, load_cases
 from core.evals.checks import (
+    AsksApproval,
     Calls,
     Check,
     CheckKind,
@@ -29,6 +30,7 @@ from core.evals.targets import (
 __all__ = [
     "JUDGE_PROMPT",
     "AnswerTarget",
+    "AsksApproval",
     "Calls",
     "CaseResult",
     "Check",

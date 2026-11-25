@@ -134,7 +134,22 @@ class ToolsConfig(_Strict):
     servers: dict[str, McpServerConfig] = Field(default_factory=dict)  # keyed by a short name
     timeout_seconds: float = Field(default=15, gt=0)  # per tool call
     max_result_chars: int = Field(default=4000, ge=100)  # longer results are cut, with a note
-    max_calls_per_turn: int = Field(default=4, ge=1, le=16)
+
+
+class AgentConfig(_Strict):
+    """Budgets for answering one question with tools, and which tool calls need a person's
+    approval first.
+
+    A step is one model call. When a budget runs out the model is asked once more, with no
+    tools, to answer from what it has. Tools whose server marks them read-only run at once;
+    any other tool pauses the run for approval unless it is listed in ``auto_approve``.
+    """
+
+    max_steps: int = Field(default=6, ge=1, le=20)
+    max_tokens: int = Field(default=50_000, ge=1000)  # input + output, summed over steps
+    max_tool_calls: int = Field(default=8, ge=1, le=50)
+    auto_approve: tuple[str, ...] = ()  # tool names that may change data without asking
+    approval_ttl_minutes: int = Field(default=60, ge=1)  # a paused run expires after this
 
 
 class ObservabilityConfig(_Strict):
@@ -162,5 +177,6 @@ class BrainConfig(_Strict):
     prompts: PromptsConfig = Field(default_factory=PromptsConfig)
     rag: RagConfig | None = None
     tools: ToolsConfig = Field(default_factory=ToolsConfig)
+    agent: AgentConfig = Field(default_factory=AgentConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
     evals: EvalsConfig = Field(default_factory=EvalsConfig)

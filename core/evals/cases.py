@@ -42,17 +42,23 @@ class Expectations(_Strict):
     rubric: str | None = None  # graded by a judge model
     # Tools that must have been called. An empty list means no tool may be called.
     calls: tuple[str, ...] | None = None
+    # Tools that must have paused for approval. An empty list means nothing may pause.
+    asks_approval: tuple[str, ...] | None = None
 
     @model_validator(mode="after")
     def _not_empty(self) -> Self:
-        if self.calls is None and not any(
-            (
-                self.contains_all,
-                self.contains_any,
-                self.excludes,
-                self.retrieves,
-                self.cites,
-                self.rubric,
+        if (
+            self.calls is None
+            and self.asks_approval is None
+            and not any(
+                (
+                    self.contains_all,
+                    self.contains_any,
+                    self.excludes,
+                    self.retrieves,
+                    self.cites,
+                    self.rubric,
+                )
             )
         ):
             raise ValueError("a case needs at least one expectation")
@@ -65,6 +71,7 @@ class EvalCase(_Strict):
     history: tuple[Turn, ...] = ()  # earlier turns, oldest first
     tags: tuple[str, ...] = ()
     expect: Expectations
+    approve: bool = True  # the decision given if the brain pauses for approval
 
     @model_validator(mode="after")
     def _history_alternates(self) -> Self:

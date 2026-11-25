@@ -8,6 +8,14 @@ from core.llm import ToolSpec
 
 
 @dataclass(frozen=True, slots=True)
+class ToolInfo:
+    """A discovered tool: what the model sees, plus what the server says about its effects."""
+
+    spec: ToolSpec
+    read_only: bool = False  # the server says the tool changes nothing (MCP readOnlyHint)
+
+
+@dataclass(frozen=True, slots=True)
 class ToolOutput:
     """What a tool returned. ``is_error`` means the tool ran and reported a failure."""
 
@@ -21,7 +29,7 @@ class ToolSource(Protocol):
     @property
     def name(self) -> str: ...
 
-    async def open(self) -> Sequence[ToolSpec]:
+    async def open(self) -> Sequence[ToolInfo]:
         """Connect and discover the tools on offer."""
         ...
 

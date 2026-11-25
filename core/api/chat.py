@@ -9,10 +9,17 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, model_validator
 
+from core.agent import ToolActivity
 from core.api.context import AppContext, get_context
-from core.api.schemas import CallMetadata, ChatMessage, SourceOut, ToolActivityOut
-from core.llm import LLMError, Message, Role, TextDelta
-from core.pipeline import Answer, Pipeline, ToolActivity
+from core.api.schemas import (
+    CallMetadata,
+    ChatMessage,
+    PendingActionOut,
+    SourceOut,
+    ToolActivityOut,
+)
+from core.llm import LLMError, Role, TextDelta
+from core.pipeline import Answer, AnswerStatus, PipelineEvent
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/v1", tags=["chat"])
@@ -34,13 +41,23 @@ class ChatMetadata(CallMetadata):
 
     sources: list[SourceOut]
     tools: list[ToolActivityOut]
+    status: AnswerStatus
+    # Set when status is awaiting_approval: decide each pending action at
+    # POST /v1/runs/{run_id}/decisions to carry on.
+    run_id: str | None
+    pending: list[PendingActionOut]
 
     @classmethod
     def from_answer(cls, answer: Answer) -> Self:
         base = CallMetadata.build(answer.completion, answer.prompts, answer.trace_id)
-        sources = [SourceOut.from_source(source) for source in answer.sources]
-        tools = [ToolActivityOut.from_activity(activity) for activity in answer.tools]
-        return cls(sources=sources, tools=tools, **base.model_dump())
+        return cls(
+            sources=[SourceOut.from_source(source) for source in answer.sources],
+            tools=[ToolActivityOut.from_activity(activity) for activity in answer.tools],
+            status=answer.status,
+            run_id=answer.run_id,
+            pending=[PendingActionOut.from_call(call) for call in answer.pending],
+            **base.model_dump(),
+        )
 
 
 class ChatResponse(ChatMetadata):
@@ -51,21 +68,33 @@ def _sse(event: str, data: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 
-async def _event_stream(pipeline: Pipeline, messages: list[Message]) -> AsyncIterator[str]:
-    """delta events carry text, tool events report each tool run, one done event carries
-    metadata, and an error event ends the stream."""
+async def event_stream(events: AsyncIterator[PipelineEvent]) -> AsyncIterator[str]:
+    """delta events carry text, tool events report each tool run, an approval event lists
+    actions waiting for a decision, one done event carries metadata, and an error event
+    ends the stream."""
     try:
-        async for event in pipeline.stream(messages):
+        async for event in events:
             if isinstance(event, TextDelta):
                 yield _sse("delta", {"text": event.text})
             elif isinstance(event, ToolActivity):
                 yield _sse("tool", ToolActivityOut.from_activity(event).model_dump())
             else:
-                yield _sse("done", ChatMetadata.from_answer(event).model_dump())
+                metadata = ChatMetadata.from_answer(event)
+                if metadata.status is AnswerStatus.AWAITING_APPROVAL:
+                    yield _sse("approval", metadata.model_dump(include={"run_id", "pending"}))
+                yield _sse("done", metadata.model_dump(mode="json"))
     except LLMError:
         # Headers are already sent, so the failure has to travel inside the stream.
         logger.exception("chat stream failed")
         yield _sse("error", {"message": "The assistant is temporarily unavailable."})
+
+
+def sse_response(events: AsyncIterator[PipelineEvent]) -> StreamingResponse:
+    return StreamingResponse(
+        event_stream(events),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @router.post("/chat", response_model=ChatResponse)
@@ -75,11 +104,7 @@ async def chat(
     pipeline = context.pipeline
     messages = [message.to_message() for message in body.messages]
     if body.stream:
-        return StreamingResponse(
-            _event_stream(pipeline, messages),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-        )
+        return sse_response(pipeline.stream(messages))
     answer = await pipeline.answer(messages)
     metadata = ChatMetadata.from_answer(answer)
     return ChatResponse(text=answer.completion.text, **metadata.model_dump())

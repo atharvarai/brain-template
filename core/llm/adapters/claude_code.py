@@ -6,14 +6,19 @@ prompt, and ``max_tokens`` cannot be enforced.
 
 Tool calling is emulated. The CLI runs tools itself, inside its own loop, which would take
 access checks and approvals away from the brain. So the tools are described in the system
-prompt instead, and the reply is constrained by a JSON schema to either a list of tool calls
-or an answer. The brain then runs the calls, exactly as it does for vendors with native tool
-calling. The cost: a request that offers tools cannot stream its text.
+prompt instead, and the model asks for them by writing a ``<function_calls>`` block in its
+reply. The adapter parses the block into tool calls and keeps it out of the streamed text;
+the brain then runs the calls, exactly as it does for vendors with native tool calling.
+
+An earlier version constrained the reply with ``--json-schema`` instead. The evals showed
+that it thinned answers (the whole answer had to fit in a JSON string), doubled input
+tokens and ruled out streaming, so the plain-text protocol replaced it.
 """
 
 import asyncio
 import json
 import os
+import re
 import tempfile
 import time
 import uuid
@@ -106,15 +111,22 @@ class SubprocessRunner:
         )
 
 
+OPEN, CLOSE = "<function_calls>", "</function_calls>"
+_BLOCK = re.compile(re.escape(OPEN) + r"(.*?)(?:" + re.escape(CLOSE) + r"|$)", re.DOTALL)
+
 _TOOL_INSTRUCTIONS = """
 
 <functions>
 The application you run inside can run the functions listed below for you. You cannot run
 them yourself, and they are not tools available to you. To have the application run one or
-more of them, list them in the tool_calls field of your structured reply and leave answer
-empty; the application runs them and sends you the results in its next message. When you
-need nothing more, or no function fits, leave tool_calls empty and write your whole reply in
-answer.
+more of them, end your reply with a block in exactly this form, holding a JSON list:
+
+<function_calls>
+[{{"name": "function_name", "arguments": {{"argument": "value"}}}}]
+</function_calls>
+
+The application runs them and sends you the results in its next message. Write nothing
+after the block. When you need no function, just reply to the user as usual, without a block.
 
 {listing}
 </functions>"""
@@ -130,8 +142,8 @@ def _render_turn(message: Message) -> str:
     if message.content:
         parts.append(message.content)
     if message.tool_calls:
-        calls = ", ".join(f"{c.name}({json.dumps(dict(c.arguments))})" for c in message.tool_calls)
-        parts.append(f"(asked the application to run: {calls})")
+        calls = [{"name": c.name, "arguments": dict(c.arguments)} for c in message.tool_calls]
+        parts.append(f"{OPEN}\n{json.dumps(calls)}\n{CLOSE}")
     return "\n".join(parts)
 
 
@@ -149,34 +161,66 @@ def render_prompt(messages: Sequence[Message]) -> str:
     return f"Conversation so far:\n{earlier}\n\n{lead}\n{_render_turn(last)}"
 
 
-def tool_reply_schema(tools: Sequence[ToolSpec]) -> dict[str, Any]:
-    """Reply shape for emulated tool calling: tool calls, or an answer."""
-    variants = [
-        {
-            "type": "object",
-            "additionalProperties": False,
-            "required": ["name", "arguments"],
-            "properties": {"name": {"const": t.name}, "arguments": dict(t.input_schema)},
-        }
-        for t in tools
-    ]
-    return {
-        "type": "object",
-        "additionalProperties": False,
-        "required": ["tool_calls", "answer"],
-        "properties": {
-            "tool_calls": {"type": "array", "items": {"anyOf": variants}},
-            "answer": {"type": "string"},
-        },
-    }
-
-
 def _tool_listing(tools: Sequence[ToolSpec]) -> str:
     return "\n".join(
         f"- {t.name}: {t.description}\n"
         f"  Arguments (JSON schema): {json.dumps(dict(t.input_schema))}"
         for t in tools
     )
+
+
+def parse_function_calls(text: str) -> tuple[str, tuple[ToolCall, ...]]:
+    """Split a reply into the text for the user and the calls in its block, if any.
+
+    A block that is not a valid JSON list of calls is left in the text: better the user sees
+    it than the brain runs something the model did not clearly ask for.
+    """
+    match = _BLOCK.search(text)
+    if match is None:
+        return text, ()
+    try:
+        raw = json.loads(match.group(1))
+    except json.JSONDecodeError:
+        return text, ()
+    if isinstance(raw, dict):
+        raw = [raw]
+    if not isinstance(raw, list) or not all(isinstance(c, dict) and "name" in c for c in raw):
+        return text, ()
+    calls = tuple(
+        ToolCall(
+            f"call_{uuid.uuid4().hex[:12]}",
+            str(c["name"]),
+            c["arguments"] if isinstance(c.get("arguments"), dict) else {},
+        )
+        for c in raw
+    )
+    return text[: match.start()].rstrip(), calls
+
+
+class _HoldBack:
+    """Streams text but holds back anything that may be the start of a function-call block,
+    so the block itself never reaches the user."""
+
+    def __init__(self) -> None:
+        self._pending = ""
+        self._blocked = False
+
+    def feed(self, text: str) -> str:
+        if self._blocked:
+            return ""
+        self._pending += text
+        if (index := self._pending.find(OPEN)) >= 0:
+            self._blocked = True
+            out, self._pending = self._pending[:index], ""
+            return out
+        keep = max((n for n in range(1, len(OPEN)) if self._pending.endswith(OPEN[:n])), default=0)
+        out = self._pending[: len(self._pending) - keep]
+        self._pending = self._pending[len(out) :]
+        return out
+
+    def flush(self) -> str:
+        out, self._pending = ("" if self._blocked else self._pending), ""
+        return out
 
 
 class ClaudeCodeProvider:
@@ -212,16 +256,11 @@ class ClaudeCodeProvider:
                 f"{self.name}: exit {result.returncode}: {result.stderr.strip()[:200]}"
             )
         completion = self._completion(payload, start)
-        return _read_tool_reply(completion) if request.offers_tools else completion
+        return _with_calls(completion) if request.offers_tools else completion
 
     async def stream(self, request: LLMRequest) -> AsyncIterator[StreamEvent]:
-        if request.offers_tools:  # the reply is a JSON object, so there is no text to stream
-            completion = await self.complete(request)
-            if completion.text:
-                yield TextDelta(completion.text)
-            yield completion
-            return
         start = time.perf_counter()
+        hold = _HoldBack() if request.offers_tools else None
         args = [*self._args(request, output_format="stream-json"), "--verbose"]
         args.append("--include-partial-messages")
         final: dict[str, Any] | None = None
@@ -234,7 +273,12 @@ class ClaudeCodeProvider:
                 if payload.get("type") == "result":
                     final = payload
                 elif text := _text_delta(payload):
-                    yield TextDelta(text)
+                    if hold is not None:
+                        text = hold.feed(text)
+                    if text:
+                        yield TextDelta(text)
+            if hold is not None and (rest := hold.flush()):
+                yield TextDelta(rest)
         except FileNotFoundError as exc:
             raise ProviderUnavailableError(f"{self.name}: CLI '{self._binary}' not found") from exc
         except TimeoutError as exc:
@@ -242,13 +286,13 @@ class ClaudeCodeProvider:
 
         if final is None:
             raise ProviderUnavailableError(f"{self.name}: stream ended without a result")
-        yield self._completion(final, start)
+        completion = self._completion(final, start)
+        yield _with_calls(completion) if request.offers_tools else completion
 
     def _args(self, request: LLMRequest, output_format: str) -> list[str]:
         system, schema = request.system, request.json_schema
         if request.offers_tools:
             system += _TOOL_INSTRUCTIONS.format(listing=_tool_listing(request.tools))
-            schema = tool_reply_schema(request.tools)
         structured = ["--json-schema", json.dumps(schema)] if schema else []
         return [*self._base_args(system, output_format), *structured]
 
@@ -303,22 +347,11 @@ class ClaudeCodeProvider:
         )
 
 
-def _read_tool_reply(completion: Completion) -> Completion:
-    """Turn the emulated ``{tool_calls, answer}`` object into a normal completion."""
-    try:
-        reply = json.loads(completion.text)
-    except json.JSONDecodeError:
-        return completion  # not the expected object: treat it as plain text
-    if not isinstance(reply, dict):
+def _with_calls(completion: Completion) -> Completion:
+    text, calls = parse_function_calls(completion.text)
+    if not calls:
         return completion
-    calls = tuple(
-        ToolCall(f"call_{uuid.uuid4().hex[:12]}", str(c["name"]), dict(c.get("arguments") or {}))
-        for c in reply.get("tool_calls") or ()
-        if isinstance(c, dict) and "name" in c
-    )
-    if calls:
-        return replace(completion, text="", tool_calls=calls, stop_reason=StopReason.TOOL_USE)
-    return replace(completion, text=str(reply.get("answer", "")))
+    return replace(completion, text=text, tool_calls=calls, stop_reason=StopReason.TOOL_USE)
 
 
 def _text_delta(payload: dict[str, Any]) -> str | None:

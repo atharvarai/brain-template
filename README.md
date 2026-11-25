@@ -6,12 +6,13 @@ Clone it, add one folder that describes your company (docs, tools, roles, prompt
 cases), and you get an assistant built from clearly separated AI layers: model, prompts,
 RAG, tools (MCP), agent, access control, guardrails, cache and router, observability and evals.
 
-**Status: early.** Milestones M0 to M5 are done: the service answers questions from a
-company's documents with citations and from the company's own systems through MCP tools,
-using a vendor-neutral model layer with failover, versioned prompts and schema-validated
-structured output. Every request is traced, and each pack carries an eval set that gates
-changes. Tool use is one round per question (the multi-step agent comes next), and there is
-no access control yet. See [docs/PLAN.md](docs/PLAN.md) for the design and the milestone list.
+**Status: early.** Milestones M0 to M6 are done: the service answers questions from a
+company's documents with citations and from the company's own systems through MCP tools.
+An agent loop takes several steps within budgets, and actions that change data wait for the
+user's approval. Underneath are a vendor-neutral model layer with failover, versioned
+prompts and schema-validated structured output. Every request is traced, and each pack
+carries an eval set that gates changes. There is no access control yet (M7). See
+[docs/PLAN.md](docs/PLAN.md) for the design and the milestone list.
 
 ## How it is organised
 
@@ -131,13 +132,10 @@ tools:
     # skilvanta: {transport: http, url: "http://backend.internal:8792/mcp"}  # production
   timeout_seconds: 10
   max_result_chars: 4000
-  max_calls_per_turn: 4
 ```
 
-For each question the model sees the documents and the tools. If it asks for tools, the
-brain runs the calls (concurrently), sends back the results and asks once more for the
-final answer, with no further calls allowed. Looping over several rounds, with budgets and
-approval for actions that change data, is the agent layer's job (M6).
+For each question the model sees the documents and the tools. What happens when it asks
+for tools is the agent's job (next section).
 
 Failures never end the request. Each one goes back to the model as an error result, and the
 model tells the user it could not get the data:
@@ -154,7 +152,8 @@ cut, with a note saying so. Streamed chats send a `tool` event for each tool run
 final `done` event lists them.
 
 Skilvanta ships a demo MCP server (`examples/edtech/mcp_server/server.py`) with synthetic
-learner data and three read-only tools: enrollments, course progress, and mentor slots.
+learner data. It has three read-only tools (enrollments, course progress, mentor slots) and
+two that change data and so need approval (book a mentor session, request a refund).
 
 ```bash
 make tools                                                # list discovered tools
@@ -165,14 +164,60 @@ make mcp-server                                           # serve it over HTTP o
 Each adapter maps tool calling onto its vendor's native feature: Anthropic `tool_use`
 blocks, OpenAI function calls, Ollama `tool_calls`. The Claude Code CLI runs tools in its
 own loop, which would take control away from the brain, so that adapter emulates tool
-calling instead. It describes the tools in the system prompt and constrains the reply to
-JSON holding either tool calls or an answer. Two costs, measured on the Skilvanta evals:
+calling. It lists the tools in the system prompt. The model asks for calls by ending its
+reply with a `<function_calls>` block, which the adapter parses and keeps out of the
+streamed text.
 
-- A request that offers tools cannot stream on this adapter.
-- Input tokens per question roughly double, because the CLI adds an internal turn for
-  schema-constrained replies.
+A first version constrained the reply to JSON with `--json-schema` instead. The evals
+caught three costs:
 
-Native adapters only add the tool definitions.
+- Answers got thinner: one refund case passed 0 of 6 runs, against 6 of 6 without tools.
+- Input tokens per question nearly doubled.
+- Streaming was impossible.
+
+The text protocol replaced it.
+
+## Agent
+
+A question that needs tools runs as a loop. One model step either answers or asks for
+tools; the brain runs them and feeds the results back, and the loop repeats. Budgets stop
+runaway loops. When one runs out, the model gets one last step with tools switched off, so
+every run ends with an answer:
+
+```yaml
+agent:
+  max_steps: 6            # model calls per question
+  max_tokens: 50000       # input + output, summed over the steps
+  max_tool_calls: 8
+  auto_approve: []        # tools that may change data without asking
+  approval_ttl_minutes: 60
+```
+
+**Approval.** MCP servers mark tools that change nothing with `readOnlyHint`. Those run at
+once. Any other tool pauses the run, unless it is listed in `auto_approve`, so a server
+that forgets the hint fails safe.
+
+A paused answer has `status: "awaiting_approval"`, a `run_id`, and the pending actions with
+their exact arguments. A streamed chat also sends an `approval` event. The client shows them
+to the user and posts the decisions:
+
+```bash
+curl http://127.0.0.1:8000/v1/runs/<run_id>/decisions -H 'content-type: application/json' \
+  -d '{"decisions": [{"call_id": "<call_id>", "approve": true}]}'
+```
+
+The run then carries on to its answer, streamed or as JSON, like `/v1/chat`. The rules:
+
+- Approved actions run exactly as shown.
+- Declined ones go back to the model as "not run, the user declined".
+- A run can be decided only once (a replay gets 409), and it expires after
+  `approval_ttl_minutes` (404).
+- Wrong or missing call ids get 422 and do not use up the run.
+
+Paused runs are stored in SQLite, so they survive a restart. Each step is traced: generate
+and tool spans carry their step number, and the trace records events such as
+`approval_requested`, `approval_decided` and `budget_reached`. A resumed run gets its own
+trace, linked to the paused one.
 
 ## Observability
 
@@ -218,18 +263,28 @@ compare with the previous run, listing regressions and fixes, and exit non-zero 
 `evals.min_pass_rate`.
 
 A `calls` expectation checks tool use: `{"calls": ["get_my_enrollments"]}` needs that tool
-to have run, and `{"calls": []}` means no tool may run.
+to have run, and `{"calls": []}` means no tool may run. `asks_approval` works the same way
+for actions that paused for approval. A case's `"approve": true` or `false` is the decision
+the eval gives when the brain asks.
 
-Skilvanta's 33 cases cover:
+Skilvanta's 38 cases cover:
 
 - facts and policies, including multi-step reasoning
 - leaks of restricted documents, and prompt injection
 - follow-up questions, and a Hinglish question
 - tool use: questions that need a tool, a tool error, and a question that must not use tools
+- agent runs: multi-step lookups, a booking approved and one declined, a refund request
 
-The latest run through the `claude_code` profile passed 32 of 33 in about 65 s. The same
-traffic would cost about $0.31 at API list prices. The failing case is the Hinglish one: the
-English-only reranker drops the section that holds the answer.
+The latest run through the `claude_code` profile passed 37 of 38 in about 80 s. The same
+traffic would cost about $0.38 at API list prices.
+
+Two cases are known to fail:
+
+- **The Hinglish case** fails every run: the English-only reranker drops the section that
+  holds the answer.
+- **`refund-day-5-one-class`** fails about half the time, since the refund tool arrived.
+  The model now offers to file the request, and in about half of the runs it leaves out
+  the refund amount.
 
 ## Quick start
 
@@ -250,7 +305,11 @@ curl http://127.0.0.1:8000/v1/chat -H 'content-type: application/json' \
 curl http://127.0.0.1:8000/v1/chat -H 'content-type: application/json' \
   -d '{"stream": false, "messages": [{"role": "user", "content": "Which courses am I enrolled in?"}]}'
 
-# streamed answer (Server-Sent Events: tool..., delta..., then done)
+# an action: pauses for approval (see "Agent" above for the decisions call)
+curl http://127.0.0.1:8000/v1/chat -H 'content-type: application/json' \
+  -d '{"stream": false, "messages": [{"role": "user", "content": "Book my mentor slot on 29 November"}]}'
+
+# streamed answer (Server-Sent Events: delta, tool, approval..., then done)
 curl -N http://127.0.0.1:8000/v1/chat -H 'content-type: application/json' \
   -d '{"messages": [{"role": "user", "content": "Who are you?"}]}'
 

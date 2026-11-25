@@ -1,11 +1,11 @@
 """Request and response bodies shared by the API routes."""
 
-from typing import Self
+from typing import Any, Self
 
 from pydantic import BaseModel, Field
 
-from core.llm import Completion, Message, Role
-from core.pipeline import ToolActivity
+from core.agent import ToolActivity
+from core.llm import Completion, Message, Role, ToolCall
 from core.prompts import PromptRef
 from core.rag import Source
 
@@ -86,7 +86,22 @@ class ToolActivityOut(BaseModel):
     name: str
     ok: bool
     latency_ms: int
+    step: int
 
     @classmethod
     def from_activity(cls, activity: ToolActivity) -> Self:
-        return cls(name=activity.name, ok=activity.ok, latency_ms=activity.latency_ms)
+        return cls(
+            name=activity.name, ok=activity.ok, latency_ms=activity.latency_ms, step=activity.step
+        )
+
+
+class PendingActionOut(BaseModel):
+    """An action waiting for approval, shown exactly as it will run if approved."""
+
+    call_id: str
+    tool: str
+    arguments: dict[str, Any]
+
+    @classmethod
+    def from_call(cls, call: ToolCall) -> Self:
+        return cls(call_id=call.id, tool=call.name, arguments=dict(call.arguments))

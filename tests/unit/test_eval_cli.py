@@ -131,7 +131,7 @@ def test_tools_lists_discovered_tools_and_calls_one(
     monkeypatch.setenv("BRAIN_PACK", str(pack_dir))
 
     assert cli.main(["tools"]) == 0
-    assert "find_order: Find an order by id." in capsys.readouterr().out
+    assert "find_order (changes data): Find an order by id." in capsys.readouterr().out
 
     assert cli.main(["tools", "--call", "find_order", "--args", '{"order_id": "A-7"}']) == 0
     assert "Order A-7: shipped" in capsys.readouterr().out

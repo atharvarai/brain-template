@@ -27,7 +27,6 @@ tools:
       command: [python, mcp_server/server.py]
   timeout_seconds: 10
   max_result_chars: 4000
-  max_calls_per_turn: 4
 
 # Each profile maps every tier to an ordered fallback chain.
 # Pick one with `active`, or override per process with BRAIN_MODEL_PROFILE.

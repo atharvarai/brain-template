@@ -14,7 +14,7 @@ import anyio
 
 from core.llm import ToolCall, ToolResult, ToolSpec
 from core.tools.errors import ToolError
-from core.tools.source import ToolOutput, ToolSource
+from core.tools.source import ToolInfo, ToolOutput, ToolSource
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +23,10 @@ class ToolExecutor(Protocol):
     @property
     def specs(self) -> tuple[ToolSpec, ...]:
         """The tools the model may call."""
+        ...
+
+    def is_read_only(self, name: str) -> bool:
+        """True if the tool's server declares that it changes nothing."""
         ...
 
     async def run(self, call: ToolCall) -> ToolResult: ...
@@ -40,12 +44,16 @@ class ToolRegistry:
         self._max_chars = max_result_chars
         self._routes: dict[str, ToolSource] = {}
         self._specs: list[ToolSpec] = []
+        self._read_only: set[str] = set()
         self._opened: list[ToolSource] = []
         self.unavailable: list[str] = []  # sources that could not be reached at start-up
 
     @property
     def specs(self) -> tuple[ToolSpec, ...]:
         return tuple(self._specs)
+
+    def is_read_only(self, name: str) -> bool:
+        return name in self._read_only
 
     async def open(self) -> None:
         """Connect every source and discover its tools.
@@ -80,6 +88,7 @@ class ToolRegistry:
                 logger.exception("could not close tool server '%s'", source.name)
         self._routes.clear()
         self._specs.clear()
+        self._read_only.clear()
 
     async def __aenter__(self) -> Self:
         await self.open()
@@ -110,15 +119,18 @@ class ToolRegistry:
             return self._error(call, "The tool could not be reached. Try again later.")
         return ToolResult(call.id, call.name, self._limit(output), output.is_error)
 
-    def _add(self, source: ToolSource, specs: Sequence[ToolSpec]) -> None:
-        for spec in specs:
-            owner = self._routes.get(spec.name)
+    def _add(self, source: ToolSource, tools: Sequence[ToolInfo]) -> None:
+        for tool in tools:
+            name = tool.spec.name
+            owner = self._routes.get(name)
             if owner is not None:
                 raise ToolError(
-                    f"tool '{spec.name}' is offered by both '{owner.name}' and '{source.name}'"
+                    f"tool '{name}' is offered by both '{owner.name}' and '{source.name}'"
                 )
-            self._routes[spec.name] = source
-            self._specs.append(spec)
+            self._routes[name] = source
+            self._specs.append(tool.spec)
+            if tool.read_only:
+                self._read_only.add(name)
 
     def _limit(self, output: ToolOutput) -> str:
         """Cut long results: they cost tokens on every later turn and bury the useful part."""

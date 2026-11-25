@@ -1,6 +1,6 @@
 # Brain Template: Repo Plan
 
-Status: approved 2026-11-25. M0 to M5 built; see section 8.
+Status: approved 2026-11-25. M0 to M6 built; see section 8.
 
 ## 1. Goal
 
@@ -51,7 +51,7 @@ flowchart LR
 | 5 | Tools only via MCP | Industry-agnostic by construction: core never names a tool | Company must run an MCP server |
 | 6 | Model-agnostic provider layer: `Provider` and `ModelTier` enums, one adapter per provider (Claude Code CLI, Anthropic, OpenAI, Ollama, Fake), chosen by config | Switching vendor is a config change; code asks for a tier, never a model name | Each adapter must map tool calling and usage into our own types |
 | 6a | Development and the author's testing use the Claude Code CLI adapter (`claude -p` on a subscription) | No API key and no cost for the author | CLI adapter has no native tool-calling loop control; tool and agent milestones may need Ollama or another adapter |
-| 6b | The Claude Code adapter emulates tool calling: tools are described in the system prompt and the reply is constrained by `--json-schema` to tool calls or an answer; the brain runs the calls | Keeps the brain in control of every tool call (access checks, approvals) while testing for free | No streaming when tools are offered; input tokens per question roughly double |
+| 6b | The Claude Code adapter emulates tool calling: tools are described in the system prompt and the model ends its reply with a `<function_calls>` JSON block, which the adapter parses (first tried: `--json-schema`, dropped in M6 after evals showed thinner answers and double tokens) | Keeps the brain in control of every tool call (access checks, approvals) while testing for free | Arguments are not schema-enforced by the model side; the tool server validates them |
 | 7 | Local embeddings by default (fastembed, ONNX) | Free, no second vendor, no PyTorch install; interface allows a hosted embedder | Lower retrieval quality than top hosted embedders; default model is English-only |
 | 8 | Cache behind an interface, stored in the same local or Postgres store; Redis adapter later | Fewer moving parts | Slower than Redis; fine at demo scale |
 | 9 | Own trace table + JSON logs; optional OpenTelemetry export | Works with zero extra services; companies plug in their own backend | No trace UI out of the box |
@@ -146,8 +146,7 @@ All data is synthetic and the README says so.
 - Docs (~40 files): course catalog, curricula, refund and placement policies, FAQs, an
   internal mentor handbook (label `internal`), placement stats (label `admin_only`).
 - MCP tools: `get_my_enrollments`, `get_course_progress(course)`, `list_mentor_slots` (read,
-  built in M5); `book_mentor_session` (write) and `request_refund` (write, needs human
-  approval) come with the agent in M6.
+  M5); `book_mentor_session` and `request_refund` (change data, so they need approval, M6).
 - Access examples: a learner cannot read another learner's progress; only mentors and admins
   read `internal`; only admins read `admin_only`.
 - Evals (~60 cases): policy questions with citations, tool tasks, access-denied cases,
@@ -188,7 +187,7 @@ Each milestone ends with a runnable state and tests.
 | M3 | RAG (03) (done) | `make ingest` loads, chunks, embeds the ed-tech docs; answers cite sources; says it does not know when the documents lack the answer. Built thin: Markdown loader only, SQLite store only, public documents only until M7. Not yet: PDF loader, production vector store adapter, reranking, query rewriting for follow-up questions |
 | M4 | Observability + evals (09) (done) | Every request writes a trace (tokens, cost, latency, prompt version, chunk ids); `make eval` runs the pack's cases and prints a pass rate; CI fails below a threshold. Built: tracer with spans and failover events, SQLite + log sinks, feedback endpoint, `traces` command; eval cases with text, retrieval (document or section), citation and judge checks; answer and retrieval modes; report archive with regressions. CI gates on retrieval evals only, since CI has no model. Findings that changed retrieval: stopwords in keyword search, and an optional reranker (on for Skilvanta) that lifted section-level retrieval from 20/23 to 22/23. Not yet: OpenTelemetry export, a trace UI, a held-out eval split, judge calibration |
 | M5 | Tools (04) (done) | Demo MCP server for ed-tech; brain discovers tools and completes a single tool round trip; tool errors handled. Built: neutral tool types in the model layer, mapped natively by the Anthropic, OpenAI and Ollama adapters and emulated by the Claude Code adapter; `ToolSource` port with an MCP adapter (stdio and Streamable HTTP, official SDK 2.x) that reconnects in the background; registry with discovery, routing, timeout, result cap and error results; one round per question in the pipeline; `tool` SSE events; degraded health when a server is down; `tools` CLI command; `calls` eval check and 6 tool cases. Live: 32/33 evals pass, 6/6 tool cases. Finding: on the Claude Code adapter, offering tools roughly doubles input tokens and turns off streaming. Not yet: write tools (need approval, M6), forwarding the user token to the server (M7), offering tools only when a question needs them (router, M9) |
-| M6 | Agent (05) | Multi-step tasks work within step and token budgets; write tools pause for approval; per-step traces |
+| M6 | Agent (05) (done) | Multi-step tasks work within step and token budgets; write tools pause for approval; per-step traces. Built: stateless agent loop over a serialisable `RunProgress`; step, token and tool-call budgets with a final no-tools step; approval from MCP `readOnlyHint` (missing hint = needs approval) plus pack `auto_approve`; paused runs in SQLite, claimed once, with expiry; `POST /v1/runs/{id}/decisions` (JSON or SSE; 404/409/422); `approval` SSE event; step numbers on spans and approval/budget events; demo write tools `book_mentor_session` and `request_refund`; `asks_approval` eval check and 5 agent cases. Findings: the JSON-schema emulation on Claude Code thinned answers (0/6 vs 6/6 on one case), so it became a text `<function_calls>` protocol, which streams and uses fewer tokens; declined actions were described as failures until the result text and system prompt v4 said otherwise (3/3 after); packs could not pin built-in prompts, now they can. Live: 37/38 evals. Not yet: binding a paused run to the user who started it (M7), deduplicating repeated identical calls |
 | M7 | Access (06) | JWT verified; retrieval filtered by labels in SQL; tool calls checked against policy and forwarded with the user token; audit log; access-denied eval cases pass |
 | M8 | Guardrails (07) | Input and output guard pipeline; PII redaction before logging; injection and grounding checks; injection eval cases pass |
 | M9 | Cache + router (08) | Prompt caching verified from usage; exact and semantic cache scoped by access labels; router sends easy questions to the small tier; eval pass rate holds while cost per question drops |

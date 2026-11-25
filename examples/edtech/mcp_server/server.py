@@ -9,9 +9,14 @@ Run it:
 
 Until the access layer forwards the user's token (milestone M7), every call acts as one demo
 learner, chosen with SKILVANTA_LEARNER_ID (default L-1042).
+
+Read tools carry MCP's readOnlyHint. The brain runs those at once; the others (booking a
+session, requesting a refund) change data, so the brain asks the user to approve them first.
+Changes live in memory and are lost when the server stops.
 """
 
 import argparse
+import itertools
 import os
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
@@ -19,6 +24,7 @@ from typing import Any
 
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
+from mcp_types import ToolAnnotations
 
 # The demo is pinned to one date so its answers, and the eval cases, stay stable.
 DEMO_TODAY = date(2026, 11, 25)
@@ -51,6 +57,7 @@ LEARNERS: dict[str, dict[str, Any]] = {
             "BEPY": {
                 "batch": "BEPY-2026-09",
                 "status": "active",
+                "purchased_on": "2026-08-28",
                 "start_date": "2026-09-05",
                 "end_date": "2026-12-27",
                 "payment": "No-cost EMI over 6 months: 3 of 6 instalments of Rs 10,000 paid",
@@ -69,6 +76,7 @@ LEARNERS: dict[str, dict[str, Any]] = {
             "DSA": {
                 "batch": "self-paced",
                 "status": "active",
+                "purchased_on": "2026-09-30",
                 "start_date": "2026-10-01",
                 "end_date": None,
                 "payment": "Paid in full: Rs 30,000",
@@ -92,6 +100,7 @@ LEARNERS: dict[str, dict[str, Any]] = {
             "DSML": {
                 "batch": "DSML-2026-08",
                 "status": "paused",
+                "purchased_on": "2026-08-01",
                 "start_date": "2026-08-11",
                 "end_date": "2027-02-22",
                 "payment": "Paid in full: Rs 95,000",
@@ -117,6 +126,26 @@ MENTOR_SLOTS: dict[str, list[str]] = {  # IST, ISO 8601
 }  # fmt: skip
 
 
+COURSE_FEES = {"FSWD": 85_000, "DSML": 95_000, "BEPY": 60_000, "DSA": 30_000}
+READ_ONLY = ToolAnnotations(read_only_hint=True)
+_ids = itertools.count(1)
+
+
+def _rupees(amount: int) -> str:
+    return f"Rs {amount:,}"
+
+
+def _refund_estimate(fee: int, day: int, classes_attended: int) -> tuple[int, str]:
+    """The refund policy in docs/refund-policy.md, as the backend would apply it."""
+    if day <= 7 and classes_attended < 2:
+        return fee, "full refund: within 7 days and fewer than 2 live classes"
+    if day <= 7:  # the policy is silent here; this demo backend reads it as 50%
+        return fee // 2, "50% refund: within 7 days but 2 or more live classes attended"
+    if day <= 21:
+        return fee // 2, "50% refund: day 8 to day 21"
+    return 0, "no refund: requested after day 21"
+
+
 def _learner() -> tuple[str, dict[str, Any]]:
     learner_id = os.environ.get("SKILVANTA_LEARNER_ID", DEFAULT_LEARNER)
     if learner_id not in LEARNERS:
@@ -140,7 +169,7 @@ def build_server() -> MCPServer:
         log_level="WARNING",  # expected tool errors (e.g. "not enrolled") are not news
     )
 
-    @server.tool()
+    @server.tool(annotations=READ_ONLY)
     def get_my_enrollments() -> dict[str, Any]:
         """List the courses the signed-in learner is enrolled in, with batch, status
         (active, paused or completed), start and end dates, and fee payment status."""
@@ -155,7 +184,7 @@ def build_server() -> MCPServer:
             ],
         }
 
-    @server.tool()
+    @server.tool(annotations=READ_ONLY)
     def get_course_progress(course: str) -> dict[str, Any]:
         """Progress of the signed-in learner in one of their courses: modules or weeks
         completed, current module, live-class attendance and pending assignments with due
@@ -173,7 +202,7 @@ def build_server() -> MCPServer:
             )
         return {"course": found.name, "status": enrollment["status"], **enrollment["progress"]}
 
-    @server.tool()
+    @server.tool(annotations=READ_ONLY)
     def list_mentor_slots(days_ahead: int = 7) -> dict[str, Any]:
         """Open slots on the signed-in learner's mentor's calendar for the next `days_ahead`
         days (1 to 14), in IST, and how many 1:1 sessions the learner has left this month."""
@@ -195,6 +224,60 @@ def build_server() -> MCPServer:
             "open_slots_ist": slots,
             "sessions_left_this_month": max(SESSIONS_PER_MONTH - used, 0),
             "note": "Slots in a new month count against that month's two sessions.",
+        }
+
+    @server.tool()
+    def book_mentor_session(slot_ist: str, agenda: str) -> dict[str, Any]:
+        """Book a 45-minute 1:1 session with the signed-in learner's mentor. `slot_ist` must
+        be one of the open slots from list_mentor_slots, exactly as listed (for example
+        2026-11-27T19:00). `agenda` is a short note on what the learner wants to cover.
+        Uses one of the learner's two sessions for that slot's month."""
+        _, learner = _learner()
+        mentor = learner["mentor"]
+        open_slots = MENTOR_SLOTS.get(mentor, [])
+        if slot_ist not in open_slots:
+            raise ToolError(f"{slot_ist} is not an open slot for {mentor}.")
+        when = datetime.fromisoformat(slot_ist)
+        if when.date() <= DEMO_TODAY:
+            raise ToolError("That slot is in the past.")
+        month = when.strftime("%Y-%m")
+        used = learner["sessions_used"].setdefault(month, [])
+        if len(used) >= SESSIONS_PER_MONTH:
+            raise ToolError(f"No sessions left in {month}: both have been used.")
+        open_slots.remove(slot_ist)
+        used.append(slot_ist[:10])
+        return {
+            "booking_id": f"BK-{next(_ids):04d}",
+            "mentor": mentor,
+            "slot_ist": slot_ist,
+            "agenda": agenda,
+            "sessions_left_that_month": SESSIONS_PER_MONTH - len(used),
+            "note": "A calendar invite with the video link is on its way.",
+        }
+
+    @server.tool()
+    def request_refund(course: str, reason: str) -> dict[str, Any]:
+        """Submit a refund request for one of the signed-in learner's courses, for support to
+        review. Returns the request id and the refund the policy gives on today's date
+        (counted in days from purchase). Submitting does not cancel the course by itself."""
+        _, learner = _learner()
+        found = _find_course(course)
+        enrollment = learner["enrollments"].get(found.id) if found else None
+        if found is None or enrollment is None:
+            raise ToolError(f"No enrollment found for '{course}'.")
+        purchased = date.fromisoformat(enrollment["purchased_on"])
+        day = (DEMO_TODAY - purchased).days + 1
+        attended = enrollment["progress"].get("live_classes_attended", 0)
+        amount, rule = _refund_estimate(COURSE_FEES[found.id], day, attended)
+        return {
+            "request_id": f"REF-{next(_ids):04d}",
+            "course": found.name,
+            "status": "submitted for support review",
+            "reason": reason,
+            "day_since_purchase": day,
+            "estimated_refund": _rupees(amount),
+            "policy_rule": rule,
+            "next_step": "Support confirms by email within 24 hours.",
         }
 
     return server

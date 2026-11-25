@@ -1,54 +1,55 @@
 """The request pipeline: composes the layers for one conversation turn.
 
-So far: retrieve documents for the question, put them in front of it, offer the company's
-tools, ask the model, run the tools it asks for (one round), ask again for the final answer,
-and trace every step. Later milestones insert guardrails, cache, router and the multi-step
-agent here, without changing the API above it.
+So far: retrieve documents for the question, put them in front of it, hand the turn to the
+agent (model steps and tool calls within budgets), and trace every step. A run that wants
+to change data pauses for approval and is resumed by a later request. Later milestones
+insert guardrails, cache and router here, without changing the API above it.
 """
 
-import asyncio
-import time
-from collections.abc import AsyncIterator, Sequence
-from dataclasses import dataclass, replace
+import uuid
+from collections.abc import AsyncIterator, Callable, Sequence
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 
-from core.config import ModelTier
-from core.llm import (
-    Completion,
-    LLMProvider,
-    LLMRequest,
-    Message,
-    ModelGateway,
-    Role,
-    TextDelta,
-    ToolCall,
-    ToolChoice,
-    ToolResult,
-    Usage,
+from core.agent import (
+    Agent,
+    AgentEvent,
+    ApprovalRequired,
+    Decision,
+    Finished,
+    InMemoryRunStore,
+    PausedRun,
+    RunProgress,
+    RunStore,
+    StepTemplate,
+    ToolActivity,
+    validate_decisions,
 )
+from core.config import ModelTier
+from core.llm import Completion, Message, ModelGateway, Role, TextDelta, ToolCall
 from core.observability import ActiveTrace, Tracer
 from core.prompts import ComposedPrompt, Prompt, PromptRef
 from core.rag import Chunk, Retriever, Source, format_documents, to_sources
-from core.tools import ToolExecutor, ToolRegistry
+from core.tools import ToolRegistry
 
 # Until the access layer exists there is no user identity, so retrieval is limited to
 # documents with no labels. Labelled (restricted) documents are indexed but never returned.
 PUBLIC_ONLY: frozenset[str] = frozenset()
+RESUME_OPERATION = "resume"
 
 
-@dataclass(frozen=True, slots=True)
-class ToolActivity:
-    """One tool run during a turn. Streamed as it finishes, and kept on the answer."""
-
-    name: str
-    ok: bool
-    latency_ms: int
+class AnswerStatus(StrEnum):
+    COMPLETE = "complete"
+    AWAITING_APPROVAL = "awaiting_approval"  # see ``pending``; resume with the ``run_id``
 
 
 @dataclass(frozen=True, slots=True)
 class Answer:
-    """A finished turn: the model's completion, what it was grounded in, and its trace id.
+    """A finished (or paused) turn: the model's completion, what it was grounded in, the
+    tools it ran, and its trace id.
 
-    When tools ran, ``completion`` covers both model calls: text joined, usage added up.
+    ``completion`` covers every model step of the run: text joined, usage added up.
     """
 
     completion: Completion
@@ -56,6 +57,9 @@ class Answer:
     prompts: tuple[PromptRef, ...]
     trace_id: str
     tools: tuple[ToolActivity, ...] = ()
+    status: AnswerStatus = AnswerStatus.COMPLETE
+    run_id: str | None = None
+    pending: tuple[ToolCall, ...] = ()  # actions waiting for approval, exactly as they will run
 
 
 PipelineEvent = TextDelta | ToolActivity | Answer
@@ -71,8 +75,10 @@ class Pipeline:
         tracer: Tracer,
         top_k: int = 5,
         default_tier: ModelTier = ModelTier.MID,
-        tools: ToolExecutor | None = None,
-        max_tool_calls: int = 4,
+        agent: Agent | None = None,
+        runs: RunStore | None = None,
+        approval_ttl: timedelta = timedelta(hours=1),
+        new_run_id: Callable[[], str] = lambda: uuid.uuid4().hex,
     ) -> None:
         self._gateway = gateway
         self._system_prompt = system_prompt
@@ -81,8 +87,10 @@ class Pipeline:
         self._tracer = tracer
         self._top_k = top_k
         self._default_tier = default_tier
-        self._tools: ToolExecutor = tools or ToolRegistry()
-        self._max_tool_calls = max_tool_calls
+        self._agent = agent or Agent(ToolRegistry())
+        self._runs: RunStore = runs or InMemoryRunStore()
+        self._approval_ttl = approval_ttl
+        self._new_run_id = new_run_id
         self._prompts = (*system_prompt.refs, turn_prompt.ref)
 
     async def retrieve(self, question: str) -> list[Chunk]:
@@ -91,106 +99,87 @@ class Pipeline:
         return [hit.chunk for hit in hits]
 
     async def answer(self, messages: Sequence[Message], *, operation: str = "chat") -> Answer:
-        async with self._tracer.trace(operation) as trace:
-            request, chunks = await self._prepare(messages, trace)
-            provider = self._gateway.for_tier(self._default_tier)
-            completion = await self._complete(provider, request, trace)
-            activity: tuple[ToolActivity, ...] = ()
-            if completion.tool_calls:
-                results, activity = await self._run_tools(completion.tool_calls, trace)
-                follow_up = _follow_up(request, completion, results)
-                final = await self._complete(provider, follow_up, trace)
-                completion = _merge(completion, final)
-            return self._finish(completion, chunks, activity, trace)
+        return await _last(self._turn(messages, operation, stream=False))
 
-    async def stream(
+    def stream(
         self, messages: Sequence[Message], *, operation: str = "chat"
     ) -> AsyncIterator[PipelineEvent]:
         """Yield ``TextDelta`` and ``ToolActivity`` events, then exactly one ``Answer``."""
+        return self._turn(messages, operation, stream=True)
+
+    async def resume(self, run_id: str, decisions: Sequence[Decision]) -> Answer:
+        """Apply a person's decisions to a paused run and carry it on to an answer."""
+        return await _last(self.resume_stream(run_id, decisions, stream=False))
+
+    async def resume_stream(
+        self, run_id: str, decisions: Sequence[Decision], *, stream: bool = True
+    ) -> AsyncIterator[PipelineEvent]:
+        # Check everything before claiming, so a bad request does not use up the approval.
+        paused = self._runs.get(run_id)
+        validate_decisions(paused.progress.pending, decisions)
+        self._runs.claim(run_id)
+        async with self._tracer.trace(RESUME_OPERATION) as trace:
+            trace.set(resumes=run_id)
+            trace.record_prompts(str(ref) for ref in self._prompts)
+            events = self._agent.resume(
+                self._gateway.for_tier(self._default_tier),
+                self._template(),
+                paused.progress,
+                decisions,
+                trace,
+                stream=stream,
+            )
+            async for event in self._relay(events, paused.progress, paused.chunks, trace):
+                yield event
+
+    async def _turn(
+        self, messages: Sequence[Message], operation: str, *, stream: bool
+    ) -> AsyncIterator[PipelineEvent]:
         async with self._tracer.trace(operation) as trace:
-            request, chunks = await self._prepare(messages, trace)
-            provider = self._gateway.for_tier(self._default_tier)
-            completion: Completion | None = None
-            async for event in self._stream_once(provider, request, trace):
-                if isinstance(event, TextDelta):
-                    yield event
-                else:
-                    completion = event
-            assert completion is not None  # _stream_once always ends with one
-            activity: tuple[ToolActivity, ...] = ()
-            if completion.tool_calls:
-                results, activity = await self._run_tools(completion.tool_calls, trace)
-                for item in activity:
-                    yield item
-                if completion.text:
-                    yield TextDelta("\n\n")
-                final: Completion | None = None
-                async for event in self._stream_once(
-                    provider, _follow_up(request, completion, results), trace
-                ):
-                    if isinstance(event, TextDelta):
-                        yield event
-                    else:
-                        final = event
-                assert final is not None
-                completion = _merge(completion, final)
-            yield self._finish(completion, chunks, activity, trace)
+            turn, chunks = await self._prepare(messages, trace)
+            progress = RunProgress(messages=list(turn))
+            events = self._agent.run(
+                self._gateway.for_tier(self._default_tier),
+                self._template(),
+                progress,
+                trace,
+                stream=stream,
+            )
+            async for event in self._relay(events, progress, chunks, trace):
+                yield event
 
-    async def _complete(
-        self, provider: LLMProvider, request: LLMRequest, trace: ActiveTrace
-    ) -> Completion:
-        with trace.span("generate", tier=self._default_tier.value) as span:
-            completion = await provider.complete(request)
-            span["model"] = completion.spec.model
-            span["tool_calls"] = len(completion.tool_calls)
-        trace.record_completion(completion)
-        return completion
+    async def _relay(
+        self,
+        events: AsyncIterator[AgentEvent],
+        progress: RunProgress,
+        chunks: Sequence[Chunk],
+        trace: ActiveTrace,
+    ) -> AsyncIterator[PipelineEvent]:
+        """Pass text and tool events through; turn the agent's ending into an ``Answer``."""
+        async for event in events:
+            if isinstance(event, TextDelta | ToolActivity):
+                yield event
+            elif isinstance(event, Finished):
+                yield self._finish(event.completion, progress, chunks, trace)
+            elif isinstance(event, ApprovalRequired):
+                run_id = self._pause(progress, chunks)
+                trace.set(run_id=run_id)
+                yield self._finish(
+                    progress.completion(), progress, chunks, trace, run_id, event.pending
+                )
 
-    async def _stream_once(
-        self, provider: LLMProvider, request: LLMRequest, trace: ActiveTrace
-    ) -> AsyncIterator[TextDelta | Completion]:
-        first = True
-        completion: Completion | None = None
-        with trace.span("generate", tier=self._default_tier.value) as span:
-            async for event in provider.stream(request):
-                if isinstance(event, TextDelta):
-                    if first:
-                        trace.event("first_token")
-                        first = False
-                    yield event
-                else:
-                    span["model"] = event.spec.model
-                    span["tool_calls"] = len(event.tool_calls)
-                    completion = event
-        if completion is None:
-            raise RuntimeError(f"{provider.name} ended its stream without a completion")
-        trace.record_completion(completion)
-        yield completion
+    def _pause(self, progress: RunProgress, chunks: Sequence[Chunk]) -> str:
+        now = datetime.now(UTC)
+        run_id = self._new_run_id()
+        self._runs.save(PausedRun(run_id, now, now + self._approval_ttl, progress, tuple(chunks)))
+        return run_id
 
-    async def _run_tools(
-        self, calls: Sequence[ToolCall], trace: ActiveTrace
-    ) -> tuple[tuple[ToolResult, ...], tuple[ToolActivity, ...]]:
-        """Run the calls concurrently. Calls over the limit are answered with an error, since
-        every call the model made needs a result."""
-        allowed, skipped = calls[: self._max_tool_calls], calls[self._max_tool_calls :]
-
-        async def run(call: ToolCall) -> tuple[ToolResult, ToolActivity]:
-            start = time.perf_counter()
-            with trace.span("tool", tool=call.name) as span:
-                result = await self._tools.run(call)
-                span["ok"] = not result.is_error
-            elapsed = round((time.perf_counter() - start) * 1000)
-            return result, ToolActivity(call.name, not result.is_error, elapsed)
-
-        ran = await asyncio.gather(*(run(call) for call in allowed))
-        limit = f"Not run: at most {self._max_tool_calls} tool calls are allowed per turn."
-        results = [result for result, _ in ran]
-        results += [ToolResult(c.id, c.name, limit, is_error=True) for c in skipped]
-        return tuple(results), tuple(activity for _, activity in ran)
+    def _template(self) -> StepTemplate:
+        return StepTemplate(self._system_prompt.text, self._agent.tools.specs)
 
     async def _prepare(
         self, messages: Sequence[Message], trace: ActiveTrace
-    ) -> tuple[LLMRequest, list[Chunk]]:
+    ) -> tuple[list[Message], list[Chunk]]:
         """Retrieve for the latest question and rewrite that turn to carry the documents.
 
         Documents go into the user turn, not the system prompt: the system prompt stays
@@ -203,19 +192,16 @@ class Pipeline:
             chunks = await self.retrieve(last.content)
             span["hits"] = len(chunks)
         turn = self._turn_prompt.render(documents=format_documents(chunks), question=last.content)
-        request = LLMRequest(
-            system=self._system_prompt.text,
-            messages=(*history, Message(Role.USER, turn)),
-            tools=self._tools.specs,
-        )
-        return request, chunks
+        return [*history, Message(Role.USER, turn)], chunks
 
     def _finish(
         self,
         completion: Completion,
+        progress: RunProgress,
         chunks: Sequence[Chunk],
-        activity: tuple[ToolActivity, ...],
         trace: ActiveTrace,
+        run_id: str | None = None,
+        pending: tuple[ToolCall, ...] = (),
     ) -> Answer:
         sources = to_sources(chunks, completion.text)
         trace.record_retrieval(
@@ -223,30 +209,24 @@ class Pipeline:
             (chunk.id for chunk, source in zip(chunks, sources, strict=True) if source.cited),
         )
         trace.capture(output=completion.text)
-        return Answer(completion, sources, self._prompts, trace.trace_id, activity)
+        trace.set(steps=progress.steps, tool_calls=progress.tool_calls)
+        return Answer(
+            completion,
+            sources,
+            self._prompts,
+            trace.trace_id,
+            tuple(progress.activity),
+            AnswerStatus.AWAITING_APPROVAL if run_id else AnswerStatus.COMPLETE,
+            run_id,
+            pending,
+        )
 
 
-def _follow_up(
-    request: LLMRequest, completion: Completion, results: Sequence[ToolResult]
-) -> LLMRequest:
-    """The second model call: the tool calls and their results appended, and no further
-    calls allowed. A multi-step loop with budgets is the agent's job (layer 05)."""
-    return replace(
-        request,
-        messages=(
-            *request.messages,
-            Message(Role.ASSISTANT, completion.text, tool_calls=completion.tool_calls),
-            Message(Role.USER, "", tool_results=tuple(results)),
-        ),
-        tool_choice=ToolChoice.NONE,
-    )
-
-
-def _merge(first: Completion, final: Completion) -> Completion:
-    """One completion for the whole turn: text joined, usage and latency added up."""
-    text = "\n\n".join(part for part in (first.text, final.text) if part)
-    usage = Usage(
-        first.usage.input_tokens + final.usage.input_tokens,
-        first.usage.output_tokens + final.usage.output_tokens,
-    )
-    return replace(final, text=text, usage=usage, latency_ms=first.latency_ms + final.latency_ms)
+async def _last(events: AsyncIterator[PipelineEvent]) -> Answer:
+    answer: Answer | None = None
+    async for event in events:
+        if isinstance(event, Answer):
+            answer = event
+    if answer is None:
+        raise RuntimeError("the pipeline ended without an answer")
+    return answer

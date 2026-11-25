@@ -33,6 +33,7 @@ def report_to_dict(report: EvalReport) -> dict[str, Any]:
                 "answer": r.outcome.answer if r.outcome else None,
                 "retrieved": list(r.outcome.retrieved) if r.outcome else [],
                 "tools_called": list(r.outcome.tools_called) if r.outcome else [],
+                "approvals_requested": list(r.outcome.approvals_requested) if r.outcome else [],
             }
             for r in report.results
         ],

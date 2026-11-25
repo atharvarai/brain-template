@@ -8,12 +8,13 @@ from core.tools.errors import ToolError
 from core.tools.factory import build_tools
 from core.tools.mcp_source import McpToolSource
 from core.tools.registry import ToolExecutor, ToolRegistry
-from core.tools.source import ToolOutput, ToolSource
+from core.tools.source import ToolInfo, ToolOutput, ToolSource
 
 __all__ = [
     "McpToolSource",
     "ToolError",
     "ToolExecutor",
+    "ToolInfo",
     "ToolOutput",
     "ToolRegistry",
     "ToolSource",

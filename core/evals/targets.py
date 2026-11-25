@@ -5,11 +5,13 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
 
+from core.agent import Decision
 from core.evals.cases import EvalCase
 from core.observability import PriceBook
 from core.pipeline import Pipeline
 
 EVAL_OPERATION = "eval"
+MAX_RESUMES = 5  # a run that keeps pausing is cut off here
 
 
 class EvalMode(StrEnum):
@@ -30,6 +32,7 @@ class EvalOutcome:
     output_tokens: int = 0
     cost_usd: float | None = None
     tools_called: tuple[str, ...] = ()  # in the order they ran
+    approvals_requested: tuple[str, ...] = ()  # tools the brain paused on
 
 
 class EvalTarget(Protocol):
@@ -48,6 +51,13 @@ class AnswerTarget:
     async def run(self, case: EvalCase) -> EvalOutcome:
         start = time.perf_counter()
         answer = await self._pipeline.answer(case.messages(), operation=EVAL_OPERATION)
+        asked: list[str] = []
+        for _ in range(MAX_RESUMES):
+            if answer.run_id is None:
+                break
+            asked += [call.name for call in answer.pending]
+            decisions = [Decision(call.id, case.approve) for call in answer.pending]
+            answer = await self._pipeline.resume(answer.run_id, decisions)
         usage, spec = answer.completion.usage, answer.completion.spec
         return EvalOutcome(
             answer=answer.completion.text,
@@ -59,6 +69,7 @@ class AnswerTarget:
             output_tokens=usage.output_tokens,
             cost_usd=self._prices.cost(spec.model, usage.input_tokens, usage.output_tokens),
             tools_called=tuple(activity.name for activity in answer.tools),
+            approvals_requested=tuple(asked),
         )
 
 

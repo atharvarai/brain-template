@@ -3,12 +3,14 @@
 import logging
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import timedelta
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
 from core import __version__
-from core.api import chat, feedback, health, title
+from core.agent import Agent, Budget, SqliteRunStore
+from core.api import chat, feedback, health, runs, title
 from core.api.context import AppContext
 from core.config import ModelTier, PackError, Settings, load_pack
 from core.llm import (
@@ -27,7 +29,7 @@ from core.observability import (
     Tracer,
 )
 from core.pipeline import Pipeline
-from core.prompts import ChainedPromptStore, FilePromptStore, build_system_prompt, builtin_store
+from core.prompts import build_system_prompt, pack_prompt_store
 from core.rag import NullRetriever, Retriever, build_rag
 from core.tasks.title import TITLE_PROMPT, TitleGenerator
 from core.tools import build_tools
@@ -38,6 +40,7 @@ logger = logging.getLogger(__name__)
 
 
 TRACES_FILE = "traces.sqlite3"
+RUNS_FILE = "runs.sqlite3"
 
 
 def build_context(settings: Settings, provider_factory: ProviderFactory) -> AppContext:
@@ -53,9 +56,7 @@ def build_context(settings: Settings, provider_factory: ProviderFactory) -> AppC
     gateway = ModelGateway.from_config(models, profile, provider_factory)
 
     # The pack's prompts win over the built-in skeletons, so a company can override any of them.
-    prompts = ChainedPromptStore(
-        [FilePromptStore(pack.prompts_dir, pack.config.prompts.pinned), builtin_store()]
-    )
+    prompts = pack_prompt_store(pack.prompts_dir, pack.config.prompts.pinned)
     store = SqliteTraceStore(pack.state_dir(settings.data_dir) / TRACES_FILE)
     tracer = Tracer(
         FanOutSink([store, LoggingTraceSink()]),
@@ -70,6 +71,7 @@ def build_context(settings: Settings, provider_factory: ProviderFactory) -> AppC
         if rag.store.count() == 0:
             logger.warning("the document index is empty: run `make ingest` to build it")
     tools = build_tools(pack.config.tools, pack.root)
+    agent = pack.config.agent
 
     return AppContext(
         pack=pack,
@@ -86,8 +88,13 @@ def build_context(settings: Settings, provider_factory: ProviderFactory) -> AppC
             turn_prompt=prompts.get(RAG_TURN_PROMPT),
             tracer=tracer,
             top_k=rag.top_k if rag else 1,
-            tools=tools,
-            max_tool_calls=pack.config.tools.max_calls_per_turn,
+            agent=Agent(
+                tools,
+                Budget(agent.max_steps, agent.max_tokens, agent.max_tool_calls),
+                auto_approve=agent.auto_approve,
+            ),
+            runs=SqliteRunStore(pack.state_dir(settings.data_dir) / RUNS_FILE),
+            approval_ttl=timedelta(minutes=agent.approval_ttl_minutes),
         ),
         title_generator=TitleGenerator(
             gateway.for_tier(ModelTier.SMALL), prompts.get(TITLE_PROMPT), tracer
@@ -147,6 +154,7 @@ def create_app(
     app.include_router(chat.router)
     app.include_router(title.router)
     app.include_router(feedback.router)
+    app.include_router(runs.router)
     app.add_exception_handler(ProviderUnavailableError, _provider_unavailable)
     app.add_exception_handler(ProviderRequestError, _provider_rejected)
     app.add_exception_handler(StructuredOutputError, _invalid_model_output)

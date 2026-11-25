@@ -8,6 +8,7 @@ import pytest
 from mcp.client.stdio import StdioServerParameters
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError as ServerToolError
+from mcp_types import ToolAnnotations
 
 from core.config import ToolsConfig
 from core.llm import ToolCall
@@ -21,7 +22,7 @@ pytestmark = pytest.mark.anyio
 def demo_server() -> MCPServer:
     server = MCPServer("demo")
 
-    @server.tool()
+    @server.tool(annotations=ToolAnnotations(read_only_hint=True))
     def add(a: int, b: int) -> int:
         """Add two numbers."""
         return a + b
@@ -38,10 +39,12 @@ async def test_tools_are_discovered_with_their_schemas() -> None:
     source = McpToolSource("demo", demo_server())
     specs = await source.open()
     try:
-        by_name = {spec.name: spec for spec in specs}
+        by_name = {info.spec.name: info for info in specs}
         assert set(by_name) == {"add", "find"}
-        assert by_name["add"].description == "Add two numbers."
-        assert by_name["add"].input_schema["required"] == ["a", "b"]
+        assert by_name["add"].spec.description == "Add two numbers."
+        assert by_name["add"].spec.input_schema["required"] == ["a", "b"]
+        assert by_name["add"].read_only  # declared with readOnlyHint
+        assert not by_name["find"].read_only  # no hint: treated as changing data
     finally:
         await source.close()
 
@@ -118,9 +121,13 @@ async def test_the_pack_starts_its_server_over_stdio() -> None:
     )  # fmt: skip
 
     async with build_tools(config, EDTECH_PACK) as registry:
-        assert {s.name for s in registry.specs} == {
+        names = {s.name for s in registry.specs}
+        assert names == {
             "get_my_enrollments", "get_course_progress", "list_mentor_slots",
+            "book_mentor_session", "request_refund",
         }  # fmt: skip
+        writes = {name for name in names if not registry.is_read_only(name)}
+        assert writes == {"book_mentor_session", "request_refund"}
         result = await registry.run(ToolCall("c1", "get_my_enrollments", {}))
 
     assert "Riya Kulkarni" in result.content
@@ -176,3 +183,34 @@ async def test_a_dead_server_is_reconnected_on_a_later_call(tmp_path: Path) -> N
         await source.close()
 
     assert first_pid != second_pid  # a fresh server process
+
+
+async def test_demo_booking_uses_a_session_and_takes_the_slot() -> None:
+    async with ToolRegistry([McpToolSource("skilvanta", build_server())]) as registry:
+        booked = await registry.run(
+            ToolCall("c1", "book_mentor_session", {"slot_ist": "2026-11-27T19:00", "agenda": "A7"})
+        )
+        twice = await registry.run(
+            ToolCall("c2", "book_mentor_session", {"slot_ist": "2026-11-29T11:00", "agenda": "x"})
+        )
+
+    body = json.loads(booked.content)
+    assert body["sessions_left_that_month"] == 0
+    assert body["booking_id"].startswith("BK-")
+    assert twice.is_error and "No sessions left in 2026-11" in twice.content
+
+
+async def test_demo_refund_follows_the_policy_document() -> None:
+    body, is_error = await run("request_refund", course="DSA", reason="no time")
+
+    assert not is_error and isinstance(body, dict)
+    assert body["estimated_refund"] == "Rs 0"
+    assert body["policy_rule"] == "no refund: requested after day 21"
+
+
+def test_refund_rules_match_the_worked_example_in_the_docs() -> None:
+    from examples.edtech.mcp_server.server import _refund_estimate
+
+    assert _refund_estimate(85_000, 5, 1)[0] == 85_000
+    assert _refund_estimate(85_000, 15, 0)[0] == 42_500
+    assert _refund_estimate(85_000, 25, 0)[0] == 0

@@ -7,13 +7,14 @@ import anyio
 import pytest
 
 from core.llm import ToolCall, ToolSpec
-from core.tools import ToolError, ToolOutput, ToolRegistry
+from core.tools import ToolError, ToolInfo, ToolOutput, ToolRegistry
 
 pytestmark = pytest.mark.anyio
 
 
-def tool(name: str) -> ToolSpec:
-    return ToolSpec(name, f"{name} tool", {"type": "object", "properties": {}})
+def tool(name: str) -> ToolInfo:
+    spec = ToolSpec(name, f"{name} tool", {"type": "object", "properties": {}})
+    return ToolInfo(spec, read_only=name.startswith(("find", "get")))
 
 
 class FakeSource:
@@ -39,7 +40,7 @@ class FakeSource:
     def name(self) -> str:
         return self._name
 
-    async def open(self) -> Sequence[ToolSpec]:
+    async def open(self) -> Sequence[ToolInfo]:
         if self._open_error:
             raise self._open_error
         return [tool(name) for name in self._tools]
@@ -65,6 +66,7 @@ async def test_calls_are_routed_to_the_source_that_offers_the_tool() -> None:
 
     async with ToolRegistry([orders, people]) as registry:
         assert [s.name for s in registry.specs] == ["find_order", "find_person"]
+        assert registry.is_read_only("find_order")
         result = await registry.run(call("find_person", id=7))
 
     assert people.calls == [("find_person", {"id": 7})]

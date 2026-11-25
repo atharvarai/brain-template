@@ -11,13 +11,12 @@ from core.llm import (
     Message,
     Role,
     StopReason,
-    TextDelta,
     ToolCall,
     ToolChoice,
     ToolResult,
     ToolSpec,
 )
-from core.llm.adapters.claude_code import ClaudeCodeProvider, render_prompt, tool_reply_schema
+from core.llm.adapters.claude_code import ClaudeCodeProvider, parse_function_calls, render_prompt
 from core.llm.adapters.fake import FakeProvider
 from tests.unit.llm.helpers import collect, spec
 from tests.unit.llm.test_claude_code import RESULT, StubRunner, ok
@@ -254,69 +253,98 @@ async def test_ollama_numbers_calls_and_drops_tools_when_calls_are_not_allowed()
 
 # --- Claude Code CLI (emulated) -------------------------------------------------------------
 
+BLOCK = (
+    '<function_calls>\n[{"name": "lookup_order", "arguments": {"order_id": "A-7"}}]\n'
+    "</function_calls>"
+)
 
-def cli_reply(structured: dict) -> dict:
-    return {**RESULT, "result": "", "stop_reason": "tool_use", "structured_output": structured}
+
+def cli_text(text: str) -> dict:
+    return {**RESULT, "result": text}
 
 
-async def test_claude_code_describes_tools_and_constrains_the_reply() -> None:
-    reply = {"tool_calls": [{"name": "lookup_order", "arguments": {"order_id": "A-7"}}],
-             "answer": ""}  # fmt: skip
-    runner = StubRunner(ok(cli_reply(reply)))
+def claude_code(runner: StubRunner) -> ClaudeCodeProvider:
+    return ClaudeCodeProvider(spec(Provider.CLAUDE_CODE), runner=runner)
 
-    completion = await ClaudeCodeProvider(spec(Provider.CLAUDE_CODE), runner=runner).complete(
-        offer()
-    )
+
+async def test_claude_code_describes_tools_and_parses_the_call_block() -> None:
+    runner = StubRunner(ok(cli_text("Let me check.\n" + BLOCK)))
+
+    completion = await claude_code(runner).complete(offer())
 
     args, _ = runner.calls[0]
     system = args[args.index("--system-prompt") + 1]
     assert system.startswith("be brief")
     assert "lookup_order: Find an order by id." in system
-    assert json.loads(args[args.index("--json-schema") + 1]) == tool_reply_schema([LOOKUP])
+    assert "--json-schema" not in args  # plain text: answers stay full and can stream
     assert args[args.index("--tools") + 1] == ""  # the CLI's own tools stay off
     assert completion.stop_reason is StopReason.TOOL_USE
-    assert completion.text == ""
+    assert completion.text == "Let me check."
     [call] = completion.tool_calls
     assert (call.name, call.arguments) == ("lookup_order", {"order_id": "A-7"})
     assert call.id.startswith("call_")
 
 
-async def test_claude_code_returns_the_answer_when_no_tool_is_needed() -> None:
-    runner = StubRunner(ok(cli_reply({"tool_calls": [], "answer": "Hello"})))
-    provider = ClaudeCodeProvider(spec(Provider.CLAUDE_CODE), runner=runner)
-
-    completion = await provider.complete(offer("hi"))
+async def test_claude_code_passes_a_plain_answer_through() -> None:
+    completion = await claude_code(StubRunner(ok(cli_text("Hello")))).complete(offer("hi"))
 
     assert (completion.text, completion.tool_calls) == ("Hello", ())
     assert completion.stop_reason is StopReason.END
 
 
-async def test_claude_code_streams_a_tool_offer_as_one_piece() -> None:
-    runner = StubRunner(ok(cli_reply({"tool_calls": [], "answer": "Hello"})))
-    provider = ClaudeCodeProvider(spec(Provider.CLAUDE_CODE), runner=runner)
+@pytest.mark.parametrize(
+    "text",
+    [
+        "<function_calls>\nnot json\n</function_calls>",
+        '<function_calls>\n[{"arguments": {}}]\n</function_calls>',
+    ],
+)
+def test_a_malformed_block_is_left_as_text_and_runs_nothing(text: str) -> None:
+    assert parse_function_calls(text) == (text, ())
 
-    events = [event async for event in provider.stream(offer("hi"))]
 
-    assert events[0] == TextDelta("Hello")
-    assert len(events) == 2
-    assert "--json-schema" in runner.calls[0][0]
+async def test_claude_code_streams_text_but_never_the_call_block() -> None:
+    def delta(text: str) -> str:
+        event = {"type": "content_block_delta", "delta": {"type": "text_delta", "text": text}}
+        return json.dumps({"type": "stream_event", "event": event})
+
+    pieces = ["Let me ", "check. <func", "tion_calls>\n[", '{"name": "lookup_order", ',
+              '"arguments": {"order_id": "A-7"}}]\n</function_calls>']  # fmt: skip
+    lines = [delta(p) for p in pieces] + [json.dumps(cli_text("Let me check. " + BLOCK))]
+
+    text, final = await collect(claude_code(StubRunner(lines=lines)).stream(offer()))
+
+    assert text == "Let me check. "
+    assert final.tool_calls[0].name == "lookup_order"
+    assert final.text == "Let me check."
 
 
-async def test_claude_code_sends_a_plain_call_once_tools_have_run() -> None:
+async def test_claude_code_streams_ordinary_answers_when_tools_are_offered() -> None:
+    def delta(text: str) -> str:
+        event = {"type": "content_block_delta", "delta": {"type": "text_delta", "text": text}}
+        return json.dumps({"type": "stream_event", "event": event})
+
+    lines = [delta("A <b>tag</b> "), delta("and <"), delta(" more"), json.dumps(cli_text("x"))]
+
+    text, _ = await collect(claude_code(StubRunner(lines=lines)).stream(offer()))
+
+    assert text == "A <b>tag</b> and < more"  # held-back text is released, not lost
+
+
+async def test_claude_code_sends_a_plain_call_once_tools_may_not_be_called() -> None:
     runner = StubRunner(ok(RESULT))
-    provider = ClaudeCodeProvider(spec(Provider.CLAUDE_CODE), runner=runner)
 
-    completion = await provider.complete(follow_up())
+    completion = await claude_code(runner).complete(follow_up())
 
     args, stdin = runner.calls[0]
-    assert "--json-schema" not in args
     assert "<functions>" not in args[args.index("--system-prompt") + 1]
     assert completion.text == "pong"
     assert "Results of the functions you asked the application to run:" in stdin
     assert '<tool_result name="lookup_order" status="ok">' in stdin
+    assert "ASSISTANT: Checking.\n<function_calls>" in stdin  # its own earlier call
 
 
-def test_render_prompt_shows_calls_and_marks_failed_results() -> None:
+def test_render_prompt_marks_failed_results() -> None:
     failed = ToolResult("call_1", "lookup_order", "no such order", is_error=True)
     prompt = render_prompt(
         (
@@ -326,7 +354,5 @@ def test_render_prompt_shows_calls_and_marks_failed_results() -> None:
         )
     )
 
-    assert 'ASSISTANT: (asked the application to run: lookup_order({"order_id": "A-7"}))' in (
-        prompt
-    )
+    assert '"name": "lookup_order"' in prompt
     assert '<tool_result name="lookup_order" status="error">\nno such order' in prompt

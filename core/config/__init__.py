@@ -10,6 +10,7 @@ from core.config.enums import (
 )
 from core.config.pack import DomainPack, PackError, load_pack
 from core.config.schema import (
+    AgentConfig,
     BrainConfig,
     EmbedderConfig,
     EvalsConfig,
@@ -28,6 +29,7 @@ from core.config.schema import (
 from core.config.settings import Settings
 
 __all__ = [
+    "AgentConfig",
     "BrainConfig",
     "DomainPack",
     "EmbedderConfig",

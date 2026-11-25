@@ -41,6 +41,9 @@ class FilePromptStore:
                     f"versions {sorted(self._versions.get(name, {}))}"
                 )
 
+    def versions(self, name: str) -> list[int]:
+        return sorted(self._versions.get(name, {}))
+
     def get(self, name: str) -> Prompt:
         versions = self._versions.get(name)
         if not versions:
@@ -69,6 +72,22 @@ class ChainedPromptStore:
         raise PromptNotFoundError(f"no prompt named '{name}' in any prompt store")
 
 
-def builtin_store() -> FilePromptStore:
+BUILTIN_DIR = Path(__file__).parent / "builtin"
+
+
+def builtin_store(pinned: Mapping[str, int] | None = None) -> FilePromptStore:
     """The generic prompt skeletons that ship with the core."""
-    return FilePromptStore(Path(__file__).parent / "builtin")
+    return FilePromptStore(BUILTIN_DIR, pinned)
+
+
+def pack_prompt_store(pack_dir: Path, pinned: Mapping[str, int] | None = None) -> PromptStore:
+    """A pack's own prompts in front of the built-in ones.
+
+    A pin in ``brain.yaml`` applies to whichever store serves that prompt: the pack's own
+    copy if it has one, otherwise the built-in. So a pack can roll back a core prompt too.
+    """
+    pinned = dict(pinned or {})
+    own = FilePromptStore(pack_dir)
+    own_pins = {name: v for name, v in pinned.items() if own.versions(name)}
+    core_pins = {name: v for name, v in pinned.items() if name not in own_pins}
+    return ChainedPromptStore([FilePromptStore(pack_dir, own_pins), builtin_store(core_pins)])

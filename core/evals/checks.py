@@ -144,6 +144,21 @@ class Calls:
         return CheckResult(self.name, not missing, detail)
 
 
+@dataclass(frozen=True, slots=True)
+class AsksApproval:
+    tools: tuple[str, ...]  # empty: nothing may pause for approval
+    name: str = "asks_approval"
+    kind: CheckKind = CheckKind.ANSWER
+
+    async def evaluate(self, case: EvalCase, outcome: EvalOutcome) -> CheckResult:
+        asked = outcome.approvals_requested
+        if not self.tools:
+            return CheckResult(self.name, not asked, f"asked for {list(asked)}" if asked else "")
+        missing = [tool for tool in self.tools if tool not in asked]
+        detail = f"did not ask about {missing} (asked {list(asked)})" if missing else ""
+        return CheckResult(self.name, not missing, detail)
+
+
 def build_checks(expect: Expectations, judge: Judge | None) -> list[Check]:
     """Factory: one check per expectation present."""
     checks: list[Check] = []
@@ -159,6 +174,8 @@ def build_checks(expect: Expectations, judge: Judge | None) -> list[Check]:
         checks.append(Cites(expect.cites))
     if expect.calls is not None:
         checks.append(Calls(expect.calls))
+    if expect.asks_approval is not None:
+        checks.append(AsksApproval(expect.asks_approval))
     if expect.rubric:
         checks.append(Rubric(expect.rubric, judge))
     return checks
