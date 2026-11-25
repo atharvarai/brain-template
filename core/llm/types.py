@@ -105,8 +105,22 @@ class LLMRequest:
 
 @dataclass(frozen=True, slots=True)
 class Usage:
+    """Token counts for one call. ``input_tokens`` is every input token, cached or not;
+    the cache fields say how many of them were read from or written to the vendor's prompt
+    cache (billed at different rates)."""
+
     input_tokens: int = 0
     output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
+
+    def __add__(self, other: "Usage") -> "Usage":
+        return Usage(
+            self.input_tokens + other.input_tokens,
+            self.output_tokens + other.output_tokens,
+            self.cache_read_tokens + other.cache_read_tokens,
+            self.cache_write_tokens + other.cache_write_tokens,
+        )
 
 
 @dataclass(frozen=True, slots=True)

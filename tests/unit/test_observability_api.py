@@ -50,6 +50,7 @@ def test_a_json_answer_returns_its_trace_id_and_the_trace_explains_it(pack_dir: 
     assert trace.input is None and trace.output is None  # content capture is off by default
     assert trace.attributes == {
         "pack": "Acme", "profile": "test", "user": "anonymous", "steps": 1, "tool_calls": 0,
+        "tier": "mid", "route": "fixed",
     }  # fmt: skip
 
 

@@ -3,7 +3,7 @@ PACK ?= examples/edtech
 BRAIN_JWT_SECRET ?= dev-only-secret-not-for-production-0001
 export BRAIN_JWT_SECRET
 
-.PHONY: install run ingest search eval eval-retrieval traces tools mcp-server token audit test lint check
+.PHONY: install run ingest search eval eval-retrieval traces tools mcp-server token audit cache-check test lint check
 
 install:
 	uv sync
@@ -40,6 +40,10 @@ token:
 
 audit:
 	BRAIN_PACK=$(PACK) uv run python -m core.cli audit
+
+# Semantic cache: hits and wrong answers per similarity threshold, on the pack's pairs.
+cache-check:
+	BRAIN_PACK=$(PACK) uv run python -m core.cli cache-check
 
 # Run the pack's demo MCP server over HTTP, for packs configured with transport: http.
 mcp-server:

@@ -23,6 +23,7 @@ class TraceSummary:
     p95_ms: int
     input_tokens: int
     output_tokens: int
+    cache_read_tokens: int
     cost_usd: float | None  # None if any traced call had no known price
     thumbs_up: int
     thumbs_down: int
@@ -30,6 +31,11 @@ class TraceSummary:
     @property
     def error_rate(self) -> float:
         return self.errors / self.count if self.count else 0.0
+
+    @property
+    def cache_rate(self) -> float:
+        """Share of input tokens served from the vendor's prompt cache."""
+        return self.cache_read_tokens / self.input_tokens if self.input_tokens else 0.0
 
 
 def summarize(traces: Sequence[Trace], feedback: dict[str, Feedback] | None = None) -> TraceSummary:
@@ -44,6 +50,7 @@ def summarize(traces: Sequence[Trace], feedback: dict[str, Feedback] | None = No
         p95_ms=percentile(latencies, 0.95),
         input_tokens=sum(t.input_tokens for t in traces),
         output_tokens=sum(t.output_tokens for t in traces),
+        cache_read_tokens=sum(t.cache_read_tokens for t in traces),
         cost_usd=None if any(c is None for c in costs) else sum(c for c in costs if c),
         thumbs_up=ratings.count(Rating.UP),
         thumbs_down=ratings.count(Rating.DOWN),

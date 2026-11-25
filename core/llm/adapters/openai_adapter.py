@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import openai
+from openai.types import CompletionUsage
 from openai.types.chat import (
     ChatCompletionFunctionToolParam,
     ChatCompletionMessageFunctionToolCallParam,
@@ -73,7 +74,7 @@ class OpenAIProvider:
         return self._completion(
             text=choice.message.content or "",
             finish_reason=choice.finish_reason,
-            usage=Usage(usage.prompt_tokens, usage.completion_tokens) if usage else Usage(),
+            usage=_usage(usage),
             start=start,
             tool_calls=calls,
         )
@@ -96,7 +97,7 @@ class OpenAIProvider:
             )
             async for chunk in chunks:
                 if chunk.usage:  # arrives on the last chunk, which has no choices
-                    usage = Usage(chunk.usage.prompt_tokens, chunk.usage.completion_tokens)
+                    usage = _usage(chunk.usage)
                 for choice in chunk.choices:
                     if choice.delta.content:
                         parts.append(choice.delta.content)
@@ -133,6 +134,15 @@ class OpenAIProvider:
             latency_ms=int((time.perf_counter() - start) * 1000),
             tool_calls=tool_calls,
         )
+
+
+def _usage(usage: CompletionUsage | None) -> Usage:
+    """OpenAI caches long prompts on its own and reports the cached part of the prompt."""
+    if usage is None:
+        return Usage()
+    details = usage.prompt_tokens_details
+    cached = (details.cached_tokens or 0) if details else 0
+    return Usage(usage.prompt_tokens, usage.completion_tokens, cache_read_tokens=cached)
 
 
 @dataclass

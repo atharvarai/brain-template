@@ -8,7 +8,7 @@ insert guardrails, cache and router here, without changing the API above it.
 
 import uuid
 from collections.abc import AsyncIterator, Callable, Sequence
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from enum import StrEnum
 
@@ -37,6 +37,7 @@ from core.agent import (
     ToolActivity,
     validate_decisions,
 )
+from core.cache import AnswerCache, CacheHit, cache_scope
 from core.config import ModelSpec, ModelTier, Provider
 from core.guardrails import GuardFlag, Guardrails
 from core.llm import (
@@ -52,6 +53,7 @@ from core.llm import (
 from core.observability import ActiveTrace, Tracer
 from core.prompts import ComposedPrompt, Prompt, PromptRef
 from core.rag import Chunk, Retriever, Source, format_documents, to_sources
+from core.router import FixedRouter, Router
 from core.tools import ToolRegistry
 
 RESUME_OPERATION = "resume"
@@ -82,6 +84,8 @@ class Answer:
     pending: tuple[ToolCall, ...] = ()  # actions waiting for approval, exactly as they will run
     flags: tuple[GuardFlag, ...] = ()  # what the guardrails noticed
     replaced: bool = False  # a guardrail replaced the model's text (streamed text is void)
+    tier: ModelTier | None = None  # the tier the router chose (None: no model was asked)
+    cached: str | None = None  # "exact" or "semantic" when served from the answer cache
 
 
 PipelineEvent = TextDelta | ToolActivity | Answer
@@ -104,7 +108,12 @@ class Pipeline:
         policy: Policy | None = None,
         guardrails: Guardrails | None = None,
         audit: AuditLog | None = None,
+        router: Router | None = None,
+        cache: AnswerCache | None = None,
+        cache_context: Callable[[], dict[str, object]] = dict,
     ) -> None:
+        """``cache_context`` returns what cached answers depend on besides the user's labels
+        and the prompts: for example the model profile and the document index version."""
         self._gateway = gateway
         self._system_prompt = system_prompt
         self._retriever = retriever
@@ -119,6 +128,9 @@ class Pipeline:
         self._policy: Policy = policy or OpenPolicy()
         self._guardrails = guardrails or Guardrails.off()
         self._audit: AuditLog = audit or InMemoryAuditLog()
+        self._router: Router = router or FixedRouter(default_tier)
+        self._cache = cache
+        self._cache_context = cache_context
         self._prompts = (*system_prompt.refs, turn_prompt.ref)
 
     async def retrieve(self, question: str, caller: Caller = ANONYMOUS_CALLER) -> list[Chunk]:
@@ -134,8 +146,9 @@ class Pipeline:
         *,
         operation: str = "chat",
         caller: Caller = ANONYMOUS_CALLER,
+        use_cache: bool = True,
     ) -> Answer:
-        return await _last(self._turn(messages, operation, caller, stream=False))
+        return await _last(self._turn(messages, operation, caller, use_cache, stream=False))
 
     def stream(
         self,
@@ -143,9 +156,10 @@ class Pipeline:
         *,
         operation: str = "chat",
         caller: Caller = ANONYMOUS_CALLER,
+        use_cache: bool = True,
     ) -> AsyncIterator[PipelineEvent]:
         """Yield ``TextDelta`` and ``ToolActivity`` events, then exactly one ``Answer``."""
-        return self._turn(messages, operation, caller, stream=True)
+        return self._turn(messages, operation, caller, use_cache, stream=True)
 
     async def resume(
         self, run_id: str, decisions: Sequence[Decision], caller: Caller = ANONYMOUS_CALLER
@@ -170,8 +184,9 @@ class Pipeline:
         async with self._tracer.trace(RESUME_OPERATION) as trace:
             trace.set(resumes=run_id, user=caller.user.id)
             trace.record_prompts(str(ref) for ref in self._prompts)
+            trace.set(tier=paused.progress.tier.value)
             events = self._agent.resume(
-                self._gateway.for_tier(self._default_tier),
+                self._gateway.for_tier(paused.progress.tier),
                 self._template(caller),
                 paused.progress,
                 decisions,
@@ -183,7 +198,13 @@ class Pipeline:
                 yield event
 
     async def _turn(
-        self, messages: Sequence[Message], operation: str, caller: Caller, *, stream: bool
+        self,
+        messages: Sequence[Message],
+        operation: str,
+        caller: Caller,
+        use_cache: bool,
+        *,
+        stream: bool,
     ) -> AsyncIterator[PipelineEvent]:
         async with self._tracer.trace(operation) as trace:
             trace.set(user=caller.user.id)
@@ -194,11 +215,23 @@ class Pipeline:
             if check.blocked:
                 yield self._blocked(check.message or "", check.flags, trace, messages[-1])
                 return
+            scope = self._scope(caller) if self._cache and use_cache else None
+            hit = await self._cache.lookup(messages, scope) if self._cache and scope else None
+            if hit is not None:
+                answer = self._from_cache(hit, trace, messages[-1])
+                if stream:
+                    yield TextDelta(answer.completion.text)
+                yield answer
+                return
+            decision = await self._router.route(messages)
+            if decision.completion is not None:
+                trace.record_completion(decision.completion)
+            trace.set(tier=decision.tier.value, route=decision.reason[:120])
             turn, chunks, source_flags = await self._prepare(messages, trace, caller)
-            progress = RunProgress(messages=list(turn))
+            progress = RunProgress(messages=list(turn), tier=decision.tier)
             noticed = (*check.flags, *source_flags)
             events = self._agent.run(
-                self._gateway.for_tier(self._default_tier),
+                self._gateway.for_tier(decision.tier),
                 self._template(caller),
                 progress,
                 trace,
@@ -206,6 +239,8 @@ class Pipeline:
                 caller=caller,
             )
             async for event in self._relay(events, progress, chunks, trace, caller, noticed):
+                if isinstance(event, Answer) and scope is not None and _cacheable(event):
+                    await self._remember(messages, scope, event)
                 yield event
 
     async def _relay(
@@ -297,7 +332,40 @@ class Pipeline:
             pending,
             (*noticed, *output.flags),
             output.replaced,
+            progress.tier,
         )
+
+    def _scope(self, caller: Caller) -> str:
+        """Who may share a cached answer: same readable labels, same prompts, same context."""
+        return cache_scope(
+            labels=sorted(self._policy.allowed_labels(caller.user)),
+            prompts=[str(ref) for ref in self._prompts],
+            **self._cache_context(),
+        )
+
+    def _from_cache(self, hit: CacheHit, trace: ActiveTrace, last: Message) -> Answer:
+        body = hit.answer.body
+        trace.event("cache_hit", kind=hit.kind, similarity=round(hit.similarity, 4))
+        trace.capture(input=last.content, output=body["text"])
+        spec = ModelSpec(provider=Provider(body["provider"]), model=body["model"])
+        completion = Completion(body["text"], spec, Usage(), StopReason.END, 0)
+        sources = tuple(Source(**source) for source in body["sources"])
+        return Answer(
+            completion, sources, self._prompts, trace.trace_id,
+            tier=ModelTier(body["tier"]), cached=hit.kind,
+        )  # fmt: skip
+
+    async def _remember(self, messages: Sequence[Message], scope: str, answer: Answer) -> None:
+        assert self._cache is not None and answer.tier is not None
+        spec = answer.completion.spec
+        body = {
+            "text": answer.completion.text,
+            "sources": [asdict(source) for source in answer.sources],
+            "provider": spec.provider.value,
+            "model": spec.model,
+            "tier": answer.tier.value,
+        }
+        await self._cache.store(messages, scope, body)
 
     def _blocked(
         self, message: str, flags: tuple[GuardFlag, ...], trace: ActiveTrace, last: Message
@@ -320,6 +388,20 @@ class Pipeline:
                         trace_id=trace.trace_id, detail={"reason": flag.detail[:200]},
                     )
                 )  # fmt: skip
+
+
+def _cacheable(answer: Answer) -> bool:
+    """Only answers that are the same for everyone with the same access: no tools ran (tool
+    data is personal), no guardrail noticed anything, and the model finished normally."""
+    return (
+        answer.status is AnswerStatus.COMPLETE
+        and not answer.tools
+        and not answer.flags
+        and not answer.replaced
+        and answer.cached is None
+        and answer.completion.stop_reason is StopReason.END
+        and bool(answer.completion.text.strip())
+    )
 
 
 async def _last(events: AsyncIterator[PipelineEvent]) -> Answer:

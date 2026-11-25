@@ -7,6 +7,7 @@
 - ``tools``   list the tools discovered from the pack's MCP servers, or call one
 - ``token``   sign a token for one of the pack's demo users (development only)
 - ``audit``   recent audit log entries: tool calls, refusals, approvals, bad tokens
+- ``cache-check``  how the semantic cache threshold trades hits against wrong answers
 """
 
 import argparse
@@ -35,6 +36,7 @@ from core.evals import (
     load_cases,
     render,
 )
+from core.evals.cache_pairs import load_pairs, score_pairs, sweep
 from core.llm import ToolCall, default_factory
 from core.observability import PriceBook, summarize, trace_to_dict
 from core.prompts import PromptError
@@ -66,6 +68,9 @@ def _parser() -> argparse.ArgumentParser:
     evaluate.add_argument("--case", action="append", default=[], help="only this case id")
     evaluate.add_argument("--min-pass-rate", type=float, default=None, help="override the bar")
     evaluate.add_argument("--no-save", action="store_true", help="do not archive the report")
+    evaluate.add_argument(
+        "--cache", action="store_true", help="let answers come from the answer cache"
+    )
 
     traces = commands.add_parser("traces", help="recent traces and a summary")
     traces.add_argument("-n", type=int, default=20, help="how many traces")
@@ -85,6 +90,9 @@ def _parser() -> argparse.ArgumentParser:
 
     audit = commands.add_parser("audit", help="recent audit log entries")
     audit.add_argument("-n", type=int, default=30)
+
+    pairs = commands.add_parser("cache-check", help="semantic cache threshold from pairs")
+    pairs.add_argument("--pairs", default="evals/cache_pairs.jsonl", help="relative to the pack")
     return parser
 
 
@@ -121,7 +129,9 @@ def _search(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
-def _eval_target(context: AppContext, retrieval_only: bool) -> tuple[EvalTarget, LLMJudge | None]:
+def _eval_target(
+    context: AppContext, retrieval_only: bool, use_cache: bool = False
+) -> tuple[EvalTarget, LLMJudge | None]:
     users = EvalUsers(context.pack, context.access.authenticator)
     if retrieval_only:
         return RetrievalTarget(context.pipeline, users.caller), None
@@ -131,7 +141,8 @@ def _eval_target(context: AppContext, retrieval_only: bool) -> tuple[EvalTarget,
         context.prompts.get(JUDGE_PROMPT),
         context.tracer,
     )
-    return AnswerTarget(context.pipeline, PriceBook(config.models.prices), users.caller), judge
+    prices = PriceBook(config.models.prices)
+    return AnswerTarget(context.pipeline, prices, users.caller, use_cache), judge
 
 
 def _eval(args: argparse.Namespace, settings: Settings) -> int:
@@ -146,7 +157,7 @@ def _eval(args: argparse.Namespace, settings: Settings) -> int:
         print("no cases match the filters")
         return 1
 
-    target, judge = _eval_target(context, args.retrieval)
+    target, judge = _eval_target(context, args.retrieval, args.cache)
     runner = EvalRunner(target, judge, config.name, context.model_profile, config.evals.concurrency)
 
     async def run() -> EvalReport:
@@ -196,7 +207,8 @@ def _traces(args: argparse.Namespace, settings: Settings) -> int:
     total_cost = f"${s.cost_usd:.4f}" if s.cost_usd is not None else "unknown"
     print(
         f"\n{s.count} traces, {s.errors} errors ({s.error_rate:.0%}); "
-        f"p50 {s.p50_ms}ms, p95 {s.p95_ms}ms; tokens {s.input_tokens} in / "
+        f"p50 {s.p50_ms}ms, p95 {s.p95_ms}ms; tokens {s.input_tokens} in "
+        f"({s.cache_rate:.0%} from prompt cache) / "
         f"{s.output_tokens} out; cost {total_cost}; feedback +{s.thumbs_up} / -{s.thumbs_down}"
     )
     return 0
@@ -266,6 +278,29 @@ def _audit(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+def _cache_check(args: argparse.Namespace, settings: Settings) -> int:
+    pack = load_pack(settings.pack)
+    rag = build_rag(pack, settings.data_dir)
+    if rag is None:
+        print(f"{pack.root}: the semantic cache needs the 'rag' embedder")
+        return 1
+    scores = score_pairs(load_pairs(pack.root / args.pairs), rag.embedder)
+    same = sum(s.pair.same for s in scores)
+    print(f"{len(scores)} pairs: {same} may share an answer, {len(scores) - same} may not\n")
+    for s in sorted(scores, key=lambda s: -s.similarity):
+        mark = "same" if s.pair.same else "DIFF"
+        guard = "" if s.figures_match else "  (figures differ: never served)"
+        print(f"  {s.similarity:.3f}  {mark}  {s.pair.a[:42]:<42} | {s.pair.b[:42]}{guard}")
+    print("\nthreshold  hits  false hits")
+    thresholds = [round(0.80 + 0.01 * i, 2) for i in range(19)]
+    for r in sweep(scores, thresholds):
+        print(f"  {r.threshold:.2f}     {r.hits:>3}/{same:<3} {r.false_hits:>4}")
+    current = pack.config.cache.semantic.threshold if pack.config.cache else None
+    if current is not None:
+        print(f"\nbrain.yaml threshold: {current}")
+    return 0
+
+
 COMMANDS: dict[str, Command] = {
     "ingest": _ingest,
     "search": _search,
@@ -274,6 +309,7 @@ COMMANDS: dict[str, Command] = {
     "tools": _tools,
     "token": _token,
     "audit": _audit,
+    "cache-check": _cache_check,
 }
 
 

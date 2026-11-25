@@ -51,6 +51,21 @@ guardrails:
   grounding: {check: numbers, action: flag}
   prompt_leak: {action: block}
 
+# Answers reused for users who may read the same documents. Only exact repeats: on this
+# pack's question pairs the embedder scored near misses above true paraphrases, so no
+# semantic threshold was safe (`make cache-check`). Tool answers are never cached.
+cache:
+  exact: true
+  semantic: {enabled: false}
+  ttl_hours: 24
+
+# Which tier answers each question. Measured on the 51 evals (docs/PLAN.md, M9): with
+# prompt caching on, routing saved little, and the heuristic router's small-tier answers
+# lost a case (the small model refused an admin a document the admin may read). So: mid.
+router:
+  kind: fixed
+  default_tier: mid
+
 # Each profile maps every tier to an ordered fallback chain.
 # Pick one with `active`, or override per process with BRAIN_MODEL_PROFILE.
 models:
@@ -82,15 +97,16 @@ models:
     #   large: [{provider: openai, model: <large-model-id>}]
 
   # US dollars per million tokens, by model id: used to cost every trace and eval run.
+  # cache_read / cache_write price input served from or written to the prompt cache.
   # The claude_code aliases carry API list prices so traces show what the same traffic would
   # cost on the API; the subscription itself is not billed per call. Ollama runs are free.
   prices:
-    claude-haiku-5-5: {input: 0.10, output: 0.50}
-    claude-sonnet-5-5: {input: 2.00, output: 10.00}
-    claude-opus-5-5: {input: 4.00, output: 20.00}
-    haiku: {input: 0.10, output: 0.50}
-    sonnet: {input: 2.00, output: 10.00}
-    opus: {input: 4.00, output: 20.00}
+    claude-haiku-5-5: {input: 0.10, output: 0.50, cache_read: 0.01, cache_write: 0.125}
+    claude-sonnet-5-5: {input: 2.00, output: 10.00, cache_read: 0.20, cache_write: 2.50}
+    claude-opus-5-5: {input: 4.00, output: 20.00, cache_read: 0.40, cache_write: 5.00}
+    haiku: {input: 0.10, output: 0.50, cache_read: 0.01, cache_write: 0.125}
+    sonnet: {input: 2.00, output: 10.00, cache_read: 0.20, cache_write: 2.50}
+    opus: {input: 4.00, output: 20.00, cache_read: 0.40, cache_write: 5.00}
     "llama3.1:8b": {input: 0, output: 0}
 
 # Traces keep timings, tokens, cost, prompt versions and document ids. Question and answer

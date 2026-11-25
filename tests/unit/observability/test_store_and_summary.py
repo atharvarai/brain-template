@@ -3,6 +3,8 @@
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from core.observability import (
     Event,
     Feedback,
@@ -93,3 +95,16 @@ def test_percentile_uses_nearest_rank() -> None:
     assert percentile([7], 0.95) == 7
     assert percentile(list(range(1, 101)), 0.5) == 50
     assert percentile(list(range(1, 101)), 0.95) == 95
+
+
+def test_cached_tokens_are_priced_at_their_own_rate() -> None:
+    from core.config import Price
+
+    price = Price(input=2.0, output=10.0, cache_read=0.2, cache_write=2.5)
+    plain = Price(input=2.0, output=10.0)
+
+    # 1M input: 600k read from cache, 100k written, 300k fresh; 0 output
+    assert price.cost(1_000_000, 0, 600_000, 100_000) == pytest.approx(
+        0.3 * 2 + 0.6 * 0.2 + 0.1 * 2.5
+    )
+    assert plain.cost(1_000_000, 0, 600_000, 100_000) == pytest.approx(2.0)  # never understated

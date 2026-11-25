@@ -5,7 +5,13 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import anthropic
-from anthropic.types import ContentBlockParam, MessageParam, ToolParam
+from anthropic.types import (
+    CacheControlEphemeralParam,
+    ContentBlockParam,
+    MessageParam,
+    TextBlockParam,
+    ToolParam,
+)
 from anthropic.types import Message as AnthropicMessage
 
 from core.config import ModelSpec
@@ -20,6 +26,11 @@ from core.llm.types import (
     ToolCall,
     Usage,
 )
+
+# Anthropic caches the request prefix up to each marked block for a few minutes. Reads cost
+# a tenth of normal input; writes cost a quarter more. Prefixes below the model's minimum
+# length are simply not cached.
+_EPHEMERAL: CacheControlEphemeralParam = {"type": "ephemeral"}
 
 _STOP_REASONS = {
     "end_turn": StopReason.END,
@@ -50,7 +61,7 @@ class AnthropicProvider:
             message = await self._client.messages.create(
                 model=self._spec.model,
                 max_tokens=request.max_tokens,
-                system=request.system,
+                system=_system(request),
                 messages=_to_params(request),
                 **_structured_output(request),
                 **_tools(request),
@@ -67,7 +78,7 @@ class AnthropicProvider:
             async with self._client.messages.stream(
                 model=self._spec.model,
                 max_tokens=request.max_tokens,
-                system=request.system,
+                system=_system(request),
                 messages=_to_params(request),
                 **_structured_output(request),
                 **_tools(request),
@@ -83,15 +94,13 @@ class AnthropicProvider:
 
     def _completion(self, message: AnthropicMessage, start: float) -> Completion:
         usage = message.usage
-        input_tokens = (
-            usage.input_tokens
-            + (usage.cache_creation_input_tokens or 0)
-            + (usage.cache_read_input_tokens or 0)
-        )
+        cache_read = usage.cache_read_input_tokens or 0
+        cache_write = usage.cache_creation_input_tokens or 0
+        input_tokens = usage.input_tokens + cache_read + cache_write
         return Completion(
             text="".join(block.text for block in message.content if block.type == "text"),
             spec=self._spec,
-            usage=Usage(input_tokens, usage.output_tokens),
+            usage=Usage(input_tokens, usage.output_tokens, cache_read, cache_write),
             stop_reason=_STOP_REASONS.get(str(message.stop_reason), StopReason.OTHER),
             latency_ms=int((time.perf_counter() - start) * 1000),
             tool_calls=tuple(
@@ -117,7 +126,13 @@ def _tools(request: LLMRequest) -> dict[str, Any]:
         {"name": t.name, "description": t.description, "input_schema": dict(t.input_schema)}
         for t in request.tools
     ]
+    tools[-1]["cache_control"] = _EPHEMERAL  # tools are the first part of the cached prefix
     return {"tools": tools, "tool_choice": {"type": request.tool_choice.value}}
+
+
+def _system(request: LLMRequest) -> list[TextBlockParam]:
+    """The system prompt is the same on every request, so it is the main thing to cache."""
+    return [{"type": "text", "text": request.system, "cache_control": _EPHEMERAL}]
 
 
 def _to_params(request: LLMRequest) -> list[MessageParam]:
@@ -148,4 +163,19 @@ def _to_params(request: LLMRequest) -> list[MessageParam]:
             params.append({"role": "user", "content": blocks})
         else:
             params.append({"role": "assistant", "content": blocks})
+    if request.offers_tools:
+        _mark_conversation(params)
     return params
+
+
+def _mark_conversation(params: list[MessageParam]) -> None:
+    """On a step that may call tools, cache the conversation too: the next agent step
+    re-sends all of it. Not on other requests, where a cache write would never be read."""
+    last = params[-1]
+    content = last["content"]
+    if isinstance(content, str):
+        last["content"] = [{"type": "text", "text": content, "cache_control": _EPHEMERAL}]
+    elif content:
+        block = dict(list(content)[-1])
+        block["cache_control"] = _EPHEMERAL
+        last["content"] = [*list(content)[:-1], block]  # type: ignore[list-item]

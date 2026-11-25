@@ -37,6 +37,7 @@ class EvalOutcome:
     tools_called: tuple[str, ...] = ()  # in the order they ran
     approvals_requested: tuple[str, ...] = ()  # tools the brain paused on
     blocked: bool = False  # a guardrail refused the message
+    tier: str | None = None  # model tier the router chose
     guard_flags: tuple[str, ...] = ()  # "guard: detail" for everything the guardrails noticed
 
 
@@ -57,17 +58,23 @@ class AnswerTarget:
     mode = EvalMode.ANSWER
 
     def __init__(
-        self, pipeline: Pipeline, prices: PriceBook, caller_for: CallerFor = _anonymous
+        self,
+        pipeline: Pipeline,
+        prices: PriceBook,
+        caller_for: CallerFor = _anonymous,
+        use_cache: bool = False,
     ) -> None:
+        """The answer cache is off by default: a cached pass says nothing about the model."""
         self._pipeline = pipeline
         self._prices = prices
         self._caller_for = caller_for
+        self._use_cache = use_cache
 
     async def run(self, case: EvalCase) -> EvalOutcome:
         start = time.perf_counter()
         caller = self._caller_for(case)
         answer = await self._pipeline.answer(
-            case.messages(), operation=EVAL_OPERATION, caller=caller
+            case.messages(), operation=EVAL_OPERATION, caller=caller, use_cache=self._use_cache
         )
         asked: list[str] = []
         for _ in range(MAX_RESUMES):
@@ -88,11 +95,18 @@ class AnswerTarget:
             cost_usd=(
                 0.0  # a guardrail answered: no model was called
                 if spec.provider is Provider.NONE
-                else self._prices.cost(spec.model, usage.input_tokens, usage.output_tokens)
+                else self._prices.cost(
+                    spec.model,
+                    usage.input_tokens,
+                    usage.output_tokens,
+                    usage.cache_read_tokens,
+                    usage.cache_write_tokens,
+                )
             ),
             tools_called=tuple(activity.name for activity in answer.tools),
             approvals_requested=tuple(asked),
             blocked=answer.status is AnswerStatus.BLOCKED,
+            tier=answer.tier.value if answer.tier else None,
             guard_flags=tuple(f"{f.guard}: {f.detail}" for f in answer.flags),
         )
 

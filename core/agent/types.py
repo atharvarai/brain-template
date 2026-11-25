@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass, field
 
-from core.config import ModelSpec
+from core.config import ModelSpec, ModelTier
 from core.llm import (
     Completion,
     Message,
@@ -61,11 +61,14 @@ class RunProgress:
     steps: int = 0
     input_tokens: int = 0
     output_tokens: int = 0
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
     latency_ms: int = 0
     tool_calls: int = 0
     texts: list[str] = field(default_factory=list)
     activity: list[ToolActivity] = field(default_factory=list)
     spec: ModelSpec | None = None  # the model that answered last
+    tier: ModelTier = ModelTier.MID  # chosen by the router; a resumed run keeps it
     stop_reason: StopReason = StopReason.END
     # While paused: the calls waiting for approval, results already in hand for the rest of
     # that step's calls, and the order the model asked for them in.
@@ -81,6 +84,8 @@ class RunProgress:
         self.steps += 1
         self.input_tokens += completion.usage.input_tokens
         self.output_tokens += completion.usage.output_tokens
+        self.cache_read_tokens += completion.usage.cache_read_tokens
+        self.cache_write_tokens += completion.usage.cache_write_tokens
         self.latency_ms += completion.latency_ms
         self.spec, self.stop_reason = completion.spec, completion.stop_reason
         if completion.text:
@@ -93,7 +98,12 @@ class RunProgress:
         return Completion(
             text="\n\n".join(self.texts),
             spec=self.spec,
-            usage=Usage(self.input_tokens, self.output_tokens),
+            usage=Usage(
+                self.input_tokens,
+                self.output_tokens,
+                self.cache_read_tokens,
+                self.cache_write_tokens,
+            ),
             stop_reason=self.stop_reason,
             latency_ms=self.latency_ms,
         )

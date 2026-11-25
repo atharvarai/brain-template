@@ -6,16 +6,18 @@ Clone it, add one folder that describes your company (docs, tools, roles, prompt
 cases), and you get an assistant built from clearly separated AI layers: model, prompts,
 RAG, tools (MCP), agent, access control, guardrails, cache and router, observability and evals.
 
-**Status: early.** Milestones M0 to M8 are done. The service answers from a company's
+**Status: early.** Milestones M0 to M9 are done. The service answers from a company's
 documents with citations, and from the company's own systems through MCP tools. An agent
 loop takes several steps within budgets, and actions that change data wait for the user's
 approval.
 
 Every request carries the user's token. Their roles decide which documents they can read
 and which tools they can call, and tools run as them. Guardrails sit around every model
-call: they refuse injection attempts, drop or mark poisoned sources, replace answers that
-leak the system prompt, flag figures no source supports, and keep personal data out of
-everything stored.
+call.
+
+Prompt caching is measured from token usage. Repeated questions are answered from a cache
+scoped to what the user may read. A router can send easy questions to a smaller model, and
+the evals decide whether it should.
 
 Underneath are a vendor-neutral model layer with failover, versioned prompts, and
 schema-validated structured output. Every request is traced, actions are audited, and each
@@ -318,6 +320,47 @@ The Skilvanta pack carries two planted injections on purpose: a learner tip page
 injected "SYSTEM:" line, and a mentor note in the demo backend data that offers a fake
 refund code. The evals check that neither has any effect.
 
+## Cost: prompt caching, answer cache, router
+
+**Prompt caching.** The system prompt is identical on every request (documents go in the
+user turn), so vendors can cache it. Usage records cached tokens separately
+(`cache_read_tokens`, `cache_write_tokens`), and prices in `brain.yaml` can give them their
+own rates. Without cache rates, cached tokens are costed at the input rate, so a missing
+price never makes a run look cheaper than it is. The Anthropic adapter marks breakpoints
+explicitly: tools and the system prompt always, the conversation only on agent steps that
+will be followed by another. `make traces` shows the share of input served from cache.
+
+**Answer cache.** An exact repeat of a question is answered without a model call. Entries
+are shared only within a scope. The scope is a hash of the user's readable labels, the
+prompt versions, the model profile and the document index version, so an entry can't cross
+an access boundary and goes stale on any prompt or document change. Only answers that are
+the same for everyone in the scope are stored: no tools ran, no guardrail noticed anything,
+and the model finished normally. Evals bypass the cache unless run with `--cache`.
+
+A semantic cache (reusing the answer to a question that means the same) is built but off by
+default. `make cache-check` scores the pack's own question pairs at every threshold. On
+Skilvanta's pairs the embedder scored near misses above true paraphrases: "What happens if
+I miss a mentor session?" and "...if my mentor misses a session?" scored 0.974, and their
+answers are opposite. No threshold was both useful and safe. Questions that differ in any
+figure ("refund on day 5" and "day 25") are never matched, whatever the score.
+
+**Router.** `fixed` uses one tier. `heuristic` sends short, impersonal lookups to the small
+tier using word rules. `model` lets the small tier classify each question. Each run below
+covers all 51 Skilvanta evals through Claude Code, with every run priced at the same rates:
+
+| Router | Pass rate | Answers on the small tier | Cost per answer | Median latency |
+|---|---|---|---|---|
+| fixed (mid) | 50/51 | 0 | $0.0034 | 4.3 s |
+| heuristic | 48/51 | 11 | $0.0029 | 4.2 s |
+| model | 50/51 | 4 | $0.0033 | 7.6 s |
+
+Prompt caching already did most of the work: 94% of input tokens came from the cache,
+cutting the cost of the same traffic by about 62%. The heuristic router saved 14% more but
+lost a case for real: the small model refused an admin a document the admin may read. The
+model router's own calls ate its savings and added latency. Skilvanta therefore stays on
+`fixed`. A pack with costlier traffic, or a small model that holds up on its evals, can
+switch with one line, or try one per process with `BRAIN_ROUTER=heuristic make eval`.
+
 ## Observability
 
 Every request (chat, title, eval, judge) writes one trace:
@@ -386,8 +429,8 @@ Skilvanta's 51 cases cover:
 
 A `blocked` expectation checks whether a guardrail refused the message.
 
-The latest run through the `claude_code` profile passed 50 of 51 in about 100 s. The same
-traffic would cost about $0.47 at API list prices. The one failing case is the Hinglish one:
+The latest run through the `claude_code` profile passed 50 of 51 in about 100 s. With prompt
+caching, the same traffic would cost about $0.17 at API list prices. The one failing case is the Hinglish one:
 the English-only reranker drops the section that holds the answer.
 
 ## Quick start

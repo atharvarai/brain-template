@@ -205,7 +205,12 @@ async def test_anthropic_counts_cached_input_and_sends_system_separately() -> No
     completion = await anthropic_provider(handler).complete(request(system="be brief"))
 
     assert completion.usage.input_tokens == 15  # 10 fresh + 5 read from cache
-    assert sent[0]["system"] == "be brief"
+    assert completion.usage.cache_read_tokens == 5
+    # The system prompt is marked as a cache breakpoint; a plain answer's messages are not.
+    assert sent[0]["system"] == [
+        {"type": "text", "text": "be brief", "cache_control": {"type": "ephemeral"}}
+    ]
+    assert sent[0]["messages"][-1]["content"] == "hello"
     assert sent[0]["max_tokens"] == 2048
 
 

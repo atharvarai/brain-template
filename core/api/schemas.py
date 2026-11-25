@@ -19,8 +19,10 @@ class ChatMessage(BaseModel):
 
 
 class UsageOut(BaseModel):
-    input_tokens: int
+    input_tokens: int  # all input, cached or not
     output_tokens: int
+    cache_read_tokens: int = 0
+    cache_write_tokens: int = 0
 
 
 class PromptRefOut(BaseModel):
@@ -74,6 +76,8 @@ class CallMetadata(BaseModel):
             usage=UsageOut(
                 input_tokens=completion.usage.input_tokens,
                 output_tokens=completion.usage.output_tokens,
+                cache_read_tokens=completion.usage.cache_read_tokens,
+                cache_write_tokens=completion.usage.cache_write_tokens,
             ),
             latency_ms=completion.latency_ms,
             prompts=[PromptRefOut.from_ref(ref) for ref in prompts],

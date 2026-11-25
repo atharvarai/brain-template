@@ -329,10 +329,9 @@ class ClaudeCodeProvider:
             raise ProviderRequestError(f"{self.name}: {message}")
 
         usage = payload.get("usage") or {}
-        input_tokens = sum(
-            int(usage.get(key) or 0)
-            for key in ("input_tokens", "cache_creation_input_tokens", "cache_read_input_tokens")
-        )
+        cache_read = int(usage.get("cache_read_input_tokens") or 0)
+        cache_write = int(usage.get("cache_creation_input_tokens") or 0)
+        input_tokens = int(usage.get("input_tokens") or 0) + cache_read + cache_write
         # With --json-schema the CLI returns the object in `structured_output` and reports
         # its internal stop reason, so a present object counts as a normal finish.
         structured = payload.get("structured_output")
@@ -344,7 +343,9 @@ class ClaudeCodeProvider:
         return Completion(
             text=text,
             spec=self._spec,
-            usage=Usage(input_tokens, int(usage.get("output_tokens") or 0)),
+            usage=Usage(
+                input_tokens, int(usage.get("output_tokens") or 0), cache_read, cache_write
+            ),
             stop_reason=stop_reason,
             latency_ms=int((time.perf_counter() - start) * 1000),
         )

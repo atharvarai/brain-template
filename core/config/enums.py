@@ -82,3 +82,11 @@ class GuardAction(StrEnum):
 class GroundingCheck(StrEnum):
     NUMBERS = "numbers"  # every figure in the answer must appear in what it was given
     OFF = "off"
+
+
+class RouterKind(StrEnum):
+    """How the brain picks a model tier for each question."""
+
+    FIXED = "fixed"  # always the default tier
+    HEURISTIC = "heuristic"  # word rules: free and instant, English only
+    MODEL = "model"  # the small tier classifies the question: one extra cheap call

@@ -94,3 +94,21 @@ def test_stopwords_do_not_decide_keyword_ranking() -> None:
 def test_a_query_of_only_stopwords_still_searches() -> None:
     store = store_with("to be or not to be", stopwords=ENGLISH)
     assert len(store.keyword_search("to be", 5, None)) == 1
+
+
+def test_the_corpus_version_moves_on_every_change(tmp_path) -> None:
+    import numpy as np
+
+    from core.rag import Chunk
+    from core.rag.store import SqliteChunkStore
+
+    store = SqliteChunkStore(tmp_path / "rag.sqlite3")
+    store.bind_embedder("hash")
+    start = store.version()
+    chunk = Chunk("a.md", 0, "A", "", "text")
+    store.upsert_document("a.md", "h1", [chunk], np.ones((1, 4), dtype=np.float32))
+    after_add = store.version()
+    store.delete_document("a.md")
+
+    assert start < after_add < store.version()
+    assert SqliteChunkStore(tmp_path / "rag.sqlite3").version() == store.version()  # persisted

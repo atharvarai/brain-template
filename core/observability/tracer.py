@@ -62,6 +62,12 @@ class UsageLike(Protocol):
     @property
     def output_tokens(self) -> int: ...
 
+    @property
+    def cache_read_tokens(self) -> int: ...
+
+    @property
+    def cache_write_tokens(self) -> int: ...
+
 
 class ActiveTrace:
     """A trace being recorded. Mutable on purpose; it becomes an immutable ``Trace`` at the end."""
@@ -92,6 +98,8 @@ class ActiveTrace:
         self._model: str | None = None
         self._input_tokens = 0
         self._output_tokens = 0
+        self._cache_read = 0
+        self._cache_write = 0
         self._cost: float | None = 0.0
         self._prompts: tuple[str, ...] = ()
         self._retrieved: tuple[str, ...] = ()
@@ -125,7 +133,15 @@ class ActiveTrace:
         self._provider, self._model = str(spec.provider), spec.model
         self._input_tokens += usage.input_tokens
         self._output_tokens += usage.output_tokens
-        cost = self._prices.cost(spec.model, usage.input_tokens, usage.output_tokens)
+        self._cache_read += usage.cache_read_tokens
+        self._cache_write += usage.cache_write_tokens
+        cost = self._prices.cost(
+            spec.model,
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_read_tokens,
+            usage.cache_write_tokens,
+        )
         self._cost = None if cost is None or self._cost is None else self._cost + cost
 
     def record_prompts(self, refs: Iterable[str]) -> None:
@@ -155,6 +171,8 @@ class ActiveTrace:
             provider=self._provider,
             model=self._model,
             input_tokens=self._input_tokens,
+            cache_read_tokens=self._cache_read,
+            cache_write_tokens=self._cache_write,
             output_tokens=self._output_tokens,
             cost_usd=self._cost if called else None,
             prompts=self._prompts,

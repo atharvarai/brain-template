@@ -5,6 +5,7 @@ from pathlib import Path
 
 from core.access import AuditLog, Policy
 from core.agent import Agent, Budget, InMemoryRunStore
+from core.cache import AnswerCache
 from core.config import ModelSpec, ModelTier, Provider, load_pack
 from core.guardrails import Guardrails
 from core.llm import Message, ModelGateway, Role, ToolCall, ToolResult, ToolSpec
@@ -13,6 +14,7 @@ from core.observability import InMemoryTraceStore, Tracer
 from core.pipeline import Pipeline
 from core.prompts import ChainedPromptStore, FilePromptStore, build_system_prompt, builtin_store
 from core.rag import Retriever
+from core.router import Router
 
 EMPTY = {"type": "object", "properties": {}}
 FIND = ToolSpec("find_order", "Find an order.", EMPTY)
@@ -56,6 +58,10 @@ def build(
     guardrails: Guardrails | None = None,
     retriever: Retriever | None = None,
     tracer_redact: Callable[[str], str] | None = None,
+    cache: AnswerCache | None = None,
+    cache_context: Callable[[], dict[str, object]] = dict,
+    router: Router | None = None,
+    gateway: ModelGateway | None = None,
 ) -> tuple[Pipeline, FakeProvider, FakeTools, InMemoryTraceStore]:
     pack = load_pack(pack_dir)
     prompts = ChainedPromptStore([FilePromptStore(pack.prompts_dir), builtin_store()])
@@ -63,7 +69,7 @@ def build(
     tools = tools or FakeTools()
     store = InMemoryTraceStore()
     pipeline = Pipeline(
-        ModelGateway({tier: provider for tier in ModelTier}),
+        gateway or ModelGateway({tier: provider for tier in ModelTier}),
         build_system_prompt(prompts, pack.config),
         retriever or _NoDocs(),
         prompts.get("rag_turn"),
@@ -73,6 +79,9 @@ def build(
         policy=policy,
         guardrails=guardrails,
         audit=audit,
+        cache=cache,
+        cache_context=cache_context,
+        router=router,
     )
     return pipeline, provider, tools, store
 

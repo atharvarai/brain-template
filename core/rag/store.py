@@ -61,6 +61,10 @@ class ChunkStore(Protocol):
 
     def delete_document(self, source: str) -> None: ...
 
+    def version(self) -> int:
+        """Goes up whenever the indexed documents change. Caches key on it."""
+        ...
+
     def count(self) -> int: ...
 
     def vector_search(
@@ -113,6 +117,7 @@ class SqliteChunkStore:
                 self._db.execute("DELETE FROM chunks")
                 self._db.execute("DELETE FROM chunks_fts")
                 self._cache = None
+                self._bump()
             self._db.execute("INSERT OR REPLACE INTO meta VALUES ('embedder', ?)", (name,))
 
     def document_hashes(self) -> dict[str, str]:
@@ -127,6 +132,7 @@ class SqliteChunkStore:
             raise ValueError("one vector is needed per chunk")
         with self._lock, self._db:
             self._delete(source)
+            self._bump()
             for chunk, vector in zip(chunks, vectors, strict=True):
                 cursor = self._db.execute(
                     "INSERT INTO chunks (source, position, title, heading, text, labels,"
@@ -148,8 +154,21 @@ class SqliteChunkStore:
                 )
             self._cache = None
 
+    def version(self) -> int:
+        with self._lock:
+            row = self._db.execute("SELECT value FROM meta WHERE key = 'version'").fetchone()
+        return int(row[0]) if row else 0
+
+    def _bump(self) -> None:
+        """Called inside a write transaction. Other processes see it on their next read."""
+        self._db.execute(
+            "INSERT INTO meta VALUES ('version', '1') "
+            "ON CONFLICT(key) DO UPDATE SET value = CAST(value AS INTEGER) + 1"
+        )
+
     def delete_document(self, source: str) -> None:
         with self._lock, self._db:
+            self._bump()
             self._delete(source)
             self._cache = None
 

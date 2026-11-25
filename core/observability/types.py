@@ -50,7 +50,9 @@ class Trace:
     error: str | None = None
     provider: str | None = None  # who actually answered, after any failover
     model: str | None = None
-    input_tokens: int = 0
+    input_tokens: int = 0  # all input, cached or not
+    cache_read_tokens: int = 0  # part of input_tokens served from the prompt cache
+    cache_write_tokens: int = 0  # part of input_tokens written to it
     output_tokens: int = 0
     cost_usd: float | None = None  # None when the model has no price, which is not zero
     prompts: tuple[str, ...] = ()  # name@vN#checksum

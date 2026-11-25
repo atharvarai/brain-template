@@ -13,6 +13,7 @@ from core.access import AccessConfigError, RedactingAuditLog, SqliteAuditLog, bu
 from core.agent import Agent, Budget, SqliteRunStore
 from core.api import chat, feedback, health, runs, title
 from core.api.context import AppContext
+from core.cache import AnswerCache, SqliteCacheStore
 from core.config import ModelTier, PackError, Settings, load_pack
 from core.guardrails import build_guardrails
 from core.llm import (
@@ -33,6 +34,7 @@ from core.observability import (
 from core.pipeline import Pipeline
 from core.prompts import build_system_prompt, pack_prompt_store
 from core.rag import NullRetriever, Retriever, build_rag
+from core.router import build_router
 from core.tasks.title import TITLE_PROMPT, TitleGenerator
 from core.tools import build_tools
 
@@ -44,6 +46,7 @@ logger = logging.getLogger(__name__)
 TRACES_FILE = "traces.sqlite3"
 RUNS_FILE = "runs.sqlite3"
 AUDIT_FILE = "audit.sqlite3"
+CACHE_FILE = "cache.sqlite3"
 
 
 def build_context(settings: Settings, provider_factory: ProviderFactory) -> AppContext:
@@ -76,6 +79,22 @@ def build_context(settings: Settings, provider_factory: ProviderFactory) -> AppC
         retriever = rag.retriever
         if rag.store.count() == 0:
             logger.warning("the document index is empty: run `make ingest` to build it")
+    router_config = pack.config.router
+    if settings.router is not None:
+        router_config = router_config.model_copy(update={"kind": settings.router})
+    router = build_router(router_config, gateway, prompts)
+    cache = None
+    if pack.config.cache is not None:
+        cache = AnswerCache(
+            SqliteCacheStore(pack.state_dir(settings.data_dir) / CACHE_FILE),
+            pack.config.cache,
+            rag.embedder if rag else None,
+        )
+
+    def cache_context() -> dict[str, object]:
+        # A cached answer is void once the profile or any document changes.
+        return {"profile": profile, "corpus": rag.store.version() if rag else 0}
+
     tools = build_tools(pack.config.tools, pack.root)
     agent = pack.config.agent
     try:
@@ -116,6 +135,10 @@ def build_context(settings: Settings, provider_factory: ProviderFactory) -> AppC
             policy=access.policy,
             guardrails=guardrails,
             audit=audit,
+            default_tier=router_config.default_tier,
+            router=router,
+            cache=cache,
+            cache_context=cache_context,
         ),
         title_generator=TitleGenerator(
             gateway.for_tier(ModelTier.SMALL), prompts.get(TITLE_PROMPT), tracer

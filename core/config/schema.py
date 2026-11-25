@@ -17,6 +17,7 @@ from core.config.enums import (
     PiiKind,
     Provider,
     RerankerKind,
+    RouterKind,
     StopwordList,
     ToolTransport,
 )
@@ -40,13 +41,34 @@ ModelProfile = dict[ModelTier, tuple[ModelSpec, ...]]
 
 
 class Price(_Strict):
-    """List price of a model in US dollars per million tokens. Used to cost each trace."""
+    """List price of a model in US dollars per million tokens. Used to cost each trace.
+
+    Cache rates are optional: without them, cached tokens are costed at the input rate, so
+    a missing rate can only overstate the cost, never hide it.
+    """
 
     input: float = Field(ge=0)
     output: float = Field(ge=0)
+    cache_read: float | None = Field(default=None, ge=0)
+    cache_write: float | None = Field(default=None, ge=0)
 
-    def cost(self, input_tokens: int, output_tokens: int) -> float:
-        return (input_tokens * self.input + output_tokens * self.output) / 1_000_000
+    def cost(
+        self,
+        input_tokens: int,
+        output_tokens: int,
+        cache_read_tokens: int = 0,
+        cache_write_tokens: int = 0,
+    ) -> float:
+        fresh = max(input_tokens - cache_read_tokens - cache_write_tokens, 0)
+        read = self.input if self.cache_read is None else self.cache_read
+        write = self.input if self.cache_write is None else self.cache_write
+        total = (
+            fresh * self.input
+            + cache_read_tokens * read
+            + cache_write_tokens * write
+            + output_tokens * self.output
+        )
+        return total / 1_000_000
 
 
 class ModelsConfig(_Strict):
@@ -237,6 +259,36 @@ class GuardrailsConfig(_Strict):
     prompt_leak: PromptLeakConfig = Field(default_factory=PromptLeakConfig)
 
 
+class SemanticCacheConfig(_Strict):
+    """Reuse the answer to an earlier question that means the same. Two questions match only
+    if their embeddings are this close and they contain exactly the same figures, so
+    "refund on day 5" never gets the answer for "refund on day 25"."""
+
+    # Off by default: small embedders can score near misses (same words, opposite meaning)
+    # above true paraphrases. Turn it on only after `core.cli cache-check` shows a threshold
+    # with no false hits on the pack's own question pairs.
+    enabled: bool = False
+    threshold: float = Field(default=0.95, gt=0, le=1)  # cosine similarity
+
+
+class CacheConfig(_Strict):
+    """Answer cache. Entries are shared only between users who may read the same documents,
+    and expire when the prompts, the documents or the model profile change. Answers that
+    used tools or tripped a guardrail are never cached: they belong to one user."""
+
+    exact: bool = True
+    semantic: SemanticCacheConfig = Field(default_factory=SemanticCacheConfig)
+    ttl_hours: float = Field(default=24, gt=0)
+
+
+class RouterConfig(_Strict):
+    """Which model tier answers each question. Easy lookups on the small tier are much
+    cheaper; the evals show whether quality holds."""
+
+    kind: RouterKind = RouterKind.FIXED
+    default_tier: ModelTier = ModelTier.MID  # for fixed, and whenever a router is unsure
+
+
 class ObservabilityConfig(_Strict):
     """What each request's trace keeps. Traces always hold timings, tokens, cost, model,
     prompt versions and document ids; the user's text and the answer only if allowed here."""
@@ -267,5 +319,7 @@ class BrainConfig(_Strict):
     agent: AgentConfig = Field(default_factory=AgentConfig)
     access: AccessConfig | None = None
     guardrails: GuardrailsConfig = Field(default_factory=GuardrailsConfig)
+    cache: CacheConfig | None = None  # off unless configured
+    router: RouterConfig = Field(default_factory=RouterConfig)
     observability: ObservabilityConfig = Field(default_factory=ObservabilityConfig)
     evals: EvalsConfig = Field(default_factory=EvalsConfig)

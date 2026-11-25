@@ -1,6 +1,7 @@
 """Eval reports: saved as JSON per run, printed as text, compared with the previous run."""
 
 import json
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,7 @@ def report_to_dict(report: EvalReport) -> dict[str, Any]:
                 "tools_called": list(r.outcome.tools_called) if r.outcome else [],
                 "approvals_requested": list(r.outcome.approvals_requested) if r.outcome else [],
                 "blocked": r.outcome.blocked if r.outcome else False,
+                "tier": r.outcome.tier if r.outcome else None,
                 "guard_flags": list(r.outcome.guard_flags) if r.outcome else [],
             }
             for r in report.results
@@ -120,12 +122,18 @@ def render(report: EvalReport, threshold: float, comparison: Comparison | None =
     ]
     if tags := report.by_tag():
         lines.append("By tag:   " + ", ".join(f"{t} {_ratio(*c)}" for t, c in tags.items()))
+    tiers = Counter(r.outcome.tier for r in report.results if r.outcome and r.outcome.tier)
+    if tiers:
+        lines.append("Tiers:    " + ", ".join(f"{t} {n}" for t, n in sorted(tiers.items())))
     p50, p95 = report.latency_ms(0.5) / 1000, report.latency_ms(0.95) / 1000
     usage = ""
     if report.mode is EvalMode.ANSWER:
         tokens_in, tokens_out = report.tokens
         cost = report.cost_usd
-        cost_text = f"${cost:.4f} at list price" if cost is not None else "cost unknown (no price)"
+        per = f", ${cost / len(report.results):.4f} per case" if cost and report.results else ""
+        cost_text = (
+            f"${cost:.4f} at list price{per}" if cost is not None else "cost unknown (no price)"
+        )
         usage = f" tokens {tokens_in} in / {tokens_out} out; {cost_text};"
     lines.append(
         f"Latency p50 {p50:.1f}s, p95 {p95:.1f}s;{usage} wall time {report.duration_ms / 1000:.1f}s"

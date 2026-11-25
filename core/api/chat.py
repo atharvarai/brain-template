@@ -52,6 +52,8 @@ class ChatMetadata(CallMetadata):
     # True when a guardrail replaced the model's answer. A streaming client must then show
     # the text of the `replace` event instead of what it streamed.
     replaced: bool
+    tier: str | None  # model tier the router chose; None when no model was asked
+    cached: str | None  # "exact" or "semantic" when the answer came from the cache
 
     @classmethod
     def from_answer(cls, answer: Answer) -> Self:
@@ -67,6 +69,8 @@ class ChatMetadata(CallMetadata):
                 for f in answer.flags
             ],
             replaced=answer.replaced,
+            tier=answer.tier.value if answer.tier else None,
+            cached=answer.cached,
             **base.model_dump(),
         )
 

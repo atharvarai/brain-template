@@ -5,7 +5,7 @@ from pathlib import Path
 
 from core.config import DomainPack
 from core.rag.chunker import MarkdownChunker
-from core.rag.embedder import build_embedder
+from core.rag.embedder import Embedder, build_embedder
 from core.rag.errors import RagError
 from core.rag.ingest import Ingestor
 from core.rag.loaders import MarkdownFolderLoader
@@ -21,6 +21,7 @@ class RagComponents:
     ingestor: Ingestor
     retriever: Retriever
     top_k: int
+    embedder: Embedder  # also used by the semantic answer cache
 
 
 def build_rag(pack: DomainPack, data_dir: Path) -> RagComponents | None:
@@ -44,4 +45,4 @@ def build_rag(pack: DomainPack, data_dir: Path) -> RagComponents | None:
         retriever = RerankingRetriever(
             retriever, build_reranker(config.reranker), config.reranker.candidates
         )
-    return RagComponents(store, ingestor, retriever, config.top_k)
+    return RagComponents(store, ingestor, retriever, config.top_k, embedder)

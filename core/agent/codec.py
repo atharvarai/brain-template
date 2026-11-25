@@ -3,7 +3,7 @@
 from typing import Any
 
 from core.agent.types import RunProgress, ToolActivity
-from core.config import ModelSpec
+from core.config import ModelSpec, ModelTier
 from core.llm import Message, Role, StopReason, ToolCall, ToolResult
 from core.rag import Chunk
 
@@ -75,6 +75,8 @@ def progress_to_dict(progress: RunProgress) -> dict[str, Any]:
         "steps": progress.steps,
         "input_tokens": progress.input_tokens,
         "output_tokens": progress.output_tokens,
+        "cache_read_tokens": progress.cache_read_tokens,
+        "cache_write_tokens": progress.cache_write_tokens,
         "latency_ms": progress.latency_ms,
         "tool_calls": progress.tool_calls,
         "texts": list(progress.texts),
@@ -84,6 +86,7 @@ def progress_to_dict(progress: RunProgress) -> dict[str, Any]:
         ],
         "spec": progress.spec.model_dump(mode="json") if progress.spec else None,
         "stop_reason": progress.stop_reason.value,
+        "tier": progress.tier.value,
         "pending": [call_to_dict(c) for c in progress.pending],
         "held": {cid: _result_to_dict(r) for cid, r in progress.held.items()},
         "batch": list(progress.batch),
@@ -96,12 +99,15 @@ def progress_from_dict(data: dict[str, Any]) -> RunProgress:
         steps=data["steps"],
         input_tokens=data["input_tokens"],
         output_tokens=data["output_tokens"],
+        cache_read_tokens=data.get("cache_read_tokens", 0),
+        cache_write_tokens=data.get("cache_write_tokens", 0),
         latency_ms=data["latency_ms"],
         tool_calls=data["tool_calls"],
         texts=list(data["texts"]),
         activity=[ToolActivity(**a) for a in data["activity"]],
         spec=ModelSpec.model_validate(data["spec"]) if data["spec"] else None,
         stop_reason=StopReason(data["stop_reason"]),
+        tier=ModelTier(data.get("tier", "mid")),
         pending=tuple(call_from_dict(c) for c in data["pending"]),
         held={cid: _result_from_dict(r) for cid, r in data["held"].items()},
         batch=tuple(data["batch"]),

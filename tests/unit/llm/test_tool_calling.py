@@ -116,6 +116,9 @@ async def test_anthropic_sends_tools_and_reads_tool_use_blocks() -> None:
     assert sent[0]["tools"][0]["name"] == "lookup_order"
     assert sent[0]["tools"][0]["input_schema"] == LOOKUP.input_schema
     assert sent[0]["tool_choice"] == {"type": "auto"}
+    # A step that may call tools caches tools and the conversation for the next step.
+    assert sent[0]["tools"][-1]["cache_control"] == {"type": "ephemeral"}
+    assert sent[0]["messages"][-1]["content"][-1]["cache_control"] == {"type": "ephemeral"}
     assert completion.stop_reason is StopReason.TOOL_USE
     assert completion.text == "Checking."
     assert completion.tool_calls == (ToolCall("toolu_1", "lookup_order", {"order_id": "A-7"}),)

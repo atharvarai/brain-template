@@ -43,6 +43,7 @@ class LoggingTraceSink:
             "model": trace.model,
             "ms": trace.duration_ms,
             "tokens_in": trace.input_tokens,
+            "tokens_cached": trace.cache_read_tokens,
             "tokens_out": trace.output_tokens,
             "cost_usd": trace.cost_usd,
             "prompts": trace.prompts,
