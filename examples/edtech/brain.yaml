@@ -13,7 +13,7 @@ rag:
   top_k: 5
   embedder: {kind: fastembed, model: BAAI/bge-small-en-v1.5}
   # Second pass over the top 20 candidates. Turned on because it lifted section-level
-  # retrieval in `make eval-retrieval` from 21/23 to 23/23 (see docs/PLAN.md, M4).
+  # retrieval in `make eval-retrieval` from 20/23 to 22/23 (brain-template docs/results.md, M4).
   reranker: {kind: fastembed, model: jinaai/jina-reranker-v1-tiny-en, candidates: 20}
 
 # Tools come from MCP servers and are discovered at start-up; nothing here names a tool.
@@ -59,7 +59,7 @@ cache:
   semantic: {enabled: false}
   ttl_hours: 24
 
-# Which tier answers each question. Measured on the 51 evals (docs/PLAN.md, M9): with
+# Which tier answers each question. Measured on the 51 evals (brain-template docs/results.md, M9): with
 # prompt caching on, routing saved little, and the heuristic router's small-tier answers
 # lost a case (the small model refused an admin a document the admin may read). So: mid.
 router:
